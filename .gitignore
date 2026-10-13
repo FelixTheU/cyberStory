@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Data and SQLite
+.data/
+*.db
+*.db-wal
+*.db-shm
+
+# Temp downloads and transcripts
+temp/
+*.opus
+*.mp3
+*.wav
+*.vtt
+*.srt
+*.json3
+
+# Backup folder
+bak/
+
+# Logs
+*.log
