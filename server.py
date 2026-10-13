@@ -46,7 +46,7 @@ async def pipeline_worker():
             item = database.get_next_pending_item()
             if item:
                 logger.info(f"Processing: [{item['source_id']}] {item['title']}")
-                database.update_item_status(item["id"], "processing")
+                database.update_item_status(item["id"], "processing", current_step="准备处理", progress_pct=5)
                 try:
                     await asyncio.get_event_loop().run_in_executor(None, process_item, item)
                 except Exception as e:

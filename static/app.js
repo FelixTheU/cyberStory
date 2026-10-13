@@ -87,14 +87,15 @@ function renderHistoryFeed(groups) {
                     badgeHtml += `<span style="font-size:10px; color:#94a3b8;">耗时 ${escapeHtml(item.cost_time_str)}</span>`;
                 }
             } else if (item.status === 'processing') {
-                const stepText = item.current_step || '正在处理';
-                const pct = item.progress_pct || 30;
+                const stepText = item.current_step || '排队准备中';
+                const pct = (typeof item.progress_pct === 'number' && item.progress_pct > 0) ? item.progress_pct : 5;
+                const elapsedStr = item.cost_time_str ? `已耗时 ${item.cost_time_str}` : '刚刚开始';
                 badgeHtml = `<span class="badge-tag tag-processing">⚡ ${escapeHtml(stepText)}</span>`;
                 progressHtml = `
                     <div class="progress-block">
-                        <div style="display:flex; justify-content:space-between;">
-                            <span>${escapeHtml(stepText)}</span>
-                            <span><b>${pct}%</b></span>
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <span><b>步骤:</b> ${escapeHtml(stepText)}</span>
+                            <span><b>${pct}%</b> <span style="font-size:9px; color:#92400e;">(${escapeHtml(elapsedStr)})</span></span>
                         </div>
                         <div class="progress-bar-bg">
                             <div class="progress-bar-val" style="width: ${pct}%;"></div>

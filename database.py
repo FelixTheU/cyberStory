@@ -354,7 +354,8 @@ def get_history_feed() -> List[Dict[str, Any]]:
     cursor = conn.cursor()
     cursor.execute("""
     SELECT id, source_id, title, author, url, duration_sec, thumbnail_url,
-           watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at
+           watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at,
+           (strftime('%s', 'now') - strftime('%s', updated_at)) as live_elapsed_sec
     FROM items
     ORDER BY id ASC;
     """)
@@ -370,6 +371,10 @@ def get_history_feed() -> List[Dict[str, Any]]:
         
         # 格式化耗时
         cost_sec = d.get("cost_time_sec") or 0.0
+        # 若处于 processing 中且 cost_sec 为 0，计算实时耗时
+        if d.get("status") == "processing" and cost_sec <= 0:
+            cost_sec = float(d.get("live_elapsed_sec") or 0.0)
+
         if cost_sec >= 60:
             m = int(cost_sec // 60)
             s = int(cost_sec % 60)
