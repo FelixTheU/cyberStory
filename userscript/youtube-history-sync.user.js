@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         CyberHistoryExplorer - YouTube History Sync
-// @namespace    https://cyberhistory.local
-// @version      1.0.1
-// @description  自动扫描 YouTube 历史记录并同步至本地 CyberHistoryExplorer 服务
-// @author       CyberHistory
+// @name         cyberstory - YouTube History Sync
+// @namespace    https://cyberstory.local
+// @version      1.1.0
+// @description  自动扫描 YouTube 历史记录并同步至本地 cyberstory 服务
+// @author       cyberstory
 // @match        https://www.youtube.com/feed/history*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '1.0.1';
+    const SCRIPT_VERSION = '1.1.0';
     const API_BASE = 'http://127.0.0.1:8765';
     const SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟
     const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 小时无新视频则刷新

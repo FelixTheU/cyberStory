@@ -1,9 +1,10 @@
 """
-CyberHistoryExplorer — yt-dlp 字幕抽取与 faster-whisper ASR 管道
+cyberstory — yt-dlp 字幕抽取与 faster-whisper ASR 管道
 """
 import os
 import re
 import json
+import time
 import subprocess
 import logging
 from pathlib import Path
@@ -12,34 +13,42 @@ from typing import List, Dict, Any, Optional
 import config
 import database
 
-logger = logging.getLogger("CyberHistory.Pipeline")
+logger = logging.getLogger("cyberstory.Pipeline")
 
 def process_item(item: Dict[str, Any]):
-    """处理单个视频：先尝试抓字幕，无字幕则降级 ASR"""
+    """处理单个视频：先尝试抓字幕，无字幕则降级 ASR，并实时更新进度与耗时"""
     source_id = item["source_id"]
     item_id = item["id"]
+    t0 = time.time()
+
+    # 标记为 processing
+    database.update_item_status(item_id, status="processing", current_step="检测字幕", progress_pct=10)
 
     # 路径 A: 尝试抓取原生字幕
     segments = try_fetch_subtitles(source_id)
     if segments:
-        logger.info(f"[{source_id}] Got native subtitles: {len(segments)} segments")
-        database.save_subtitles_and_index(item_id, segments, "native")
+        cost = time.time() - t0
+        logger.info(f"[{source_id}] Got native subtitles: {len(segments)} segments in {cost:.1f}s")
+        database.save_subtitles_and_index(item_id, segments, "native", cost_time_sec=cost)
         return
 
     # 路径 B: ASR 降级
     logger.info(f"[{source_id}] No native subtitles, trying ASR...")
+    database.update_item_status(item_id, status="processing", current_step="下载音频中", progress_pct=25)
     try:
-        segments = try_asr_transcribe(source_id)
+        segments = try_asr_transcribe(source_id, item_id, t0)
         if segments:
-            logger.info(f"[{source_id}] ASR transcription: {len(segments)} segments")
-            database.save_subtitles_and_index(item_id, segments, "asr")
+            cost = time.time() - t0
+            logger.info(f"[{source_id}] ASR transcription: {len(segments)} segments in {cost:.1f}s")
+            database.save_subtitles_and_index(item_id, segments, "asr", cost_time_sec=cost)
             return
     except Exception as e:
         logger.warning(f"[{source_id}] ASR failed: {e}")
 
     # 均失败：仅索引标题
+    cost = time.time() - t0
     logger.warning(f"[{source_id}] No subtitles available, indexing title only")
-    database.save_subtitles_and_index(item_id, [], "none")
+    database.save_subtitles_and_index(item_id, [], "none", cost_time_sec=cost)
 
 
 def try_fetch_subtitles(video_id: str) -> Optional[List[Dict[str, Any]]]:
@@ -133,7 +142,7 @@ def parse_vtt(vtt_path: Path) -> List[Dict[str, Any]]:
     return segments
 
 
-def try_asr_transcribe(video_id: str) -> Optional[List[Dict[str, Any]]]:
+def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[List[Dict[str, Any]]]:
     """使用 faster-whisper 进行本地 ASR 转写"""
     audio_dir = config.TEMP_DIR / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -164,8 +173,17 @@ def try_asr_transcribe(video_id: str) -> Optional[List[Dict[str, Any]]]:
     actual_path = actual_files[0]
 
     try:
+        if item_id:
+            elapsed = time.time() - t0 if t0 else 0
+            database.update_item_status(item_id, status="processing", current_step="Whisper模型加载", progress_pct=40, cost_time_sec=elapsed)
+
         from faster_whisper import WhisperModel
         model = WhisperModel(config.WHISPER_MODEL, device=config.WHISPER_DEVICE, compute_type=config.WHISPER_COMPUTE_TYPE)
+
+        if item_id:
+            elapsed = time.time() - t0 if t0 else 0
+            database.update_item_status(item_id, status="processing", current_step="Whisper语音推理中", progress_pct=50, cost_time_sec=elapsed)
+
         segments_gen, info = model.transcribe(
             str(actual_path),
             beam_size=5,
@@ -175,12 +193,24 @@ def try_asr_transcribe(video_id: str) -> Optional[List[Dict[str, Any]]]:
         )
 
         segments = []
+        total_duration = info.duration if hasattr(info, 'duration') and info.duration else 0
+        last_progress_update = time.time()
+
         for seg in segments_gen:
             segments.append({
                 "start": seg.start,
                 "end": seg.end,
                 "text": seg.text.strip()
             })
+            # 动态更新进度 (50% ~ 95%)
+            now = time.time()
+            if item_id and total_duration > 0 and (now - last_progress_update > 3.0):
+                last_progress_update = now
+                calc_pct = int(50 + (seg.end / total_duration) * 45)
+                calc_pct = min(98, max(50, calc_pct))
+                elapsed = now - t0 if t0 else 0
+                database.update_item_status(item_id, status="processing", current_step="Whisper语音推理中", progress_pct=calc_pct, cost_time_sec=elapsed)
+
         return segments if segments else None
 
     except ImportError:

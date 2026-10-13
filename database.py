@@ -29,12 +29,27 @@ def init_db():
         watched_at TEXT,
         status TEXT NOT NULL DEFAULT 'pending', -- pending, processing, ready, failed
         sub_source TEXT,                        -- native, asr, none
+        progress_pct INTEGER DEFAULT 0,         -- 进度百分比 0-100
+        cost_time_sec REAL DEFAULT 0,           -- 总耗费秒数
+        current_step TEXT,                      -- 当前步骤，如 '下载音频', 'Whisper识别'
         error_message TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(source, source_id)
     );
     """)
+
+    # 尝试补充新增列 (兼容已创建的数据库)
+    for col_def in [
+        ("progress_pct", "INTEGER DEFAULT 0"),
+        ("cost_time_sec", "REAL DEFAULT 0"),
+        ("current_step", "TEXT")
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE items ADD COLUMN {col_def[0]} {col_def[1]};")
+        except Exception:
+            pass
+
     
     # 2. 字幕分段表
     cursor.execute("""
@@ -114,18 +129,24 @@ def get_next_pending_item() -> Optional[Dict[str, Any]]:
     conn.close()
     return dict(row) if row else None
 
-def update_item_status(item_id: int, status: str, error_message: Optional[str] = None, sub_source: Optional[str] = None):
+def update_item_status(item_id: int, status: str, error_message: Optional[str] = None, sub_source: Optional[str] = None, progress_pct: Optional[int] = None, cost_time_sec: Optional[float] = None, current_step: Optional[str] = None):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
     UPDATE items
-    SET status = ?, error_message = ?, sub_source = COALESCE(?, sub_source), updated_at = CURRENT_TIMESTAMP
+    SET status = ?, 
+        error_message = ?, 
+        sub_source = COALESCE(?, sub_source),
+        progress_pct = COALESCE(?, progress_pct),
+        cost_time_sec = COALESCE(?, cost_time_sec),
+        current_step = COALESCE(?, current_step),
+        updated_at = CURRENT_TIMESTAMP
     WHERE id = ?;
-    """, (status, error_message, sub_source, item_id))
+    """, (status, error_message, sub_source, progress_pct, cost_time_sec, current_step, item_id))
     conn.commit()
     conn.close()
 
-def save_subtitles_and_index(item_id: int, segments: List[Dict[str, Any]], sub_source: str):
+def save_subtitles_and_index(item_id: int, segments: List[Dict[str, Any]], sub_source: str, cost_time_sec: float = 0.0):
     """保存分段字幕，并生成全文索引"""
     conn = get_connection()
     cursor = conn.cursor()
@@ -166,9 +187,14 @@ def save_subtitles_and_index(item_id: int, segments: List[Dict[str, Any]], sub_s
     # 更新 items 状态
     cursor.execute("""
     UPDATE items
-    SET status = 'ready', sub_source = ?, updated_at = CURRENT_TIMESTAMP
+    SET status = 'ready', 
+        sub_source = ?, 
+        progress_pct = 100, 
+        cost_time_sec = ?, 
+        current_step = '已完成',
+        updated_at = CURRENT_TIMESTAMP
     WHERE id = ?;
-    """, (sub_source, item_id))
+    """, (sub_source, cost_time_sec, item_id))
     
     conn.commit()
     conn.close()
@@ -321,6 +347,49 @@ def get_item_subtitles(item_id: int) -> List[Dict[str, Any]]:
         })
     conn.close()
     return segments
+
+def get_history_feed() -> List[Dict[str, Any]]:
+    """获取按日期分组的历史记录流，包含状态、进度、耗时信息"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT id, source_id, title, author, url, duration_sec, thumbnail_url,
+           watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at
+    FROM items
+    ORDER BY id ASC;
+    """)
+    rows = cursor.fetchall()
+    
+    # 格式化数据并按 watched_at (日期标签如 '今天', '昨天', '9月11日' 等) 分组
+    groups_map = {}
+    ordered_groups = []
+    
+    for r in rows:
+        d = dict(r)
+        d["duration_str"] = _format_time(d["duration_sec"]) if d["duration_sec"] else "00:00"
+        
+        # 格式化耗时
+        cost_sec = d.get("cost_time_sec") or 0.0
+        if cost_sec >= 60:
+            m = int(cost_sec // 60)
+            s = int(cost_sec % 60)
+            d["cost_time_str"] = f"{m}m{s}s"
+        else:
+            d["cost_time_str"] = f"{int(cost_sec)}s"
+            
+        group_title = d.get("watched_at") or "未知日期"
+        if group_title not in groups_map:
+            group_obj = {
+                "date": group_title,
+                "items": []
+            }
+            groups_map[group_title] = group_obj
+            ordered_groups.append(group_obj)
+            
+        groups_map[group_title]["items"].append(d)
+        
+    conn.close()
+    return ordered_groups
 
 def get_stats() -> Dict[str, Any]:
     conn = get_connection()

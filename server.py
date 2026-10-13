@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
 
 # --- App ---
 
-app = FastAPI(title="CyberHistoryExplorer", lifespan=lifespan)
+app = FastAPI(title="cyberstory", version="1.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -107,7 +107,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "CyberHistoryExplorer"}
+    return {"status": "ok", "service": "cyberstory"}
 
 @app.post("/api/sync/youtube")
 async def sync_youtube(req: SyncRequest):
@@ -128,9 +128,12 @@ async def search_api(
 @app.get("/api/items/{item_id}/subtitles")
 async def item_subtitles(item_id: int):
     subtitles = database.get_item_subtitles(item_id)
-    if not subtitles:
-        raise HTTPException(404, "No subtitles found for this item")
     return {"item_id": item_id, "subtitles": subtitles}
+
+@app.get("/api/history")
+async def history_feed():
+    """获取按日期分组的历史记录列表，包含状态、进度与耗时"""
+    return database.get_history_feed()
 
 @app.get("/api/status")
 async def status():

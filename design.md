@@ -1,8 +1,8 @@
-# CyberHistoryExplorer 系统设计文档
+# cyberstory 系统设计文档
 
 ## 1. 系统概述与目标
 
-**CyberHistoryExplorer** 是一个面向个人的全文本地历史记录检索与知识管理系统。
+**cyberstory** 是一个面向个人的全文本地历史记录检索与知识管理系统。
 当前阶段核心聚焦于 **YouTube 历史记录的台词级全文检索**。
 
 ### 1.1 核心痛点
