@@ -209,21 +209,80 @@
             gap: 8px;
             align-items: center;
         }
-        .search-source-select {
-            padding: 9px 12px;
-            font-size: 13px;
-            font-weight: 600;
+        /* ─── 搜索源高级自定义选择器 ─── */
+        .source-custom-select {
+            position: relative;
+            flex-shrink: 0;
+            user-select: none;
+        }
+        .source-select-trigger {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: #f8fafc;
             border: 1px solid #cbd5e1;
             border-radius: 8px;
-            background: #f8fafc;
+            font-size: 13px;
+            font-weight: 600;
             color: #334155;
-            outline: none;
             cursor: pointer;
-            transition: all 0.15s;
+            transition: all 0.15s ease;
         }
-        .search-source-select:focus {
-            border-color: var(--primary);
-            background: #fff;
+        .source-select-trigger:hover {
+            background: #f1f5f9;
+            border-color: #94a3b8;
+        }
+        .source-select-trigger svg {
+            flex-shrink: 0;
+        }
+        .source-trigger-arrow {
+            font-size: 10px;
+            color: #64748b;
+            transition: transform 0.2s ease;
+        }
+        .source-custom-select.open .source-trigger-arrow {
+            transform: rotate(180deg);
+        }
+        .source-dropdown-menu {
+            display: none;
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
+            min-width: 170px;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+            padding: 4px;
+            z-index: 50;
+        }
+        .source-custom-select.open .source-dropdown-menu {
+            display: block;
+        }
+        .source-menu-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #334155;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .source-menu-item:hover {
+            background: #f1f5f9;
+            color: #0f172a;
+        }
+        .source-menu-item.selected {
+            background: #eff6ff;
+            color: var(--primary);
+            font-weight: 600;
+        }
+        .source-menu-item svg {
+            flex-shrink: 0;
         }
         .search-input-wrapper {
             position: relative;
@@ -678,16 +737,15 @@
                 <span class="badge" id="navYtCount">0</span>
             </div>
 
-            <!-- Tab 3: 知乎历史记录 (官方知乎蓝色矢量图标) -->
+            <!-- Tab 3: 知乎历史记录 (官方知乎蓝色矢量图标，含官方完整‘知’字图形) -->
             <div class="nav-tab" id="tab-nav-zhihu" onclick="switchMainTab('zhihu')">
                 <span class="nav-icon">
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
-                        <rect width="24" height="24" rx="5" fill="#0084FF"/>
-                        <path fill="#FFF" d="M5.9 7.1h3.7v1.3H7.9c-.2 1.4-.7 3-1.6 4.3 1 .4 2 1 3.1 1.5l-.8 1.4c-1.2-.6-2.3-1.3-3.3-1.9-.7 1.3-1.7 2.2-2.8 3l-.8-1.2c1.1-.7 1.9-1.6 2.6-2.8-.6-.7-1.2-1.7-1.6-2.8l1.3-.4c.3.9.7 1.6 1.3 2.2.6-1.1 1-2.3 1.3-3.3H5.9V7.1zm7.5 0h1.5v2.9h2.3v1.3h-2.3v5.1c0 .9-.3 1.3-1.2 1.3-.7 0-2 0-3-.2l-.2-1.3c.7.1 1.7.2 2.2.2.3 0 .4-.1.4-.4v-4.7h-2.1v-1.3h2.1V7.1z"/>
+                        <path fill="#0084FF" d="M5.721 0C2.251 0 0 2.25 0 5.719V18.28C0 21.751 2.252 24 5.721 24h12.56C21.751 24 24 21.75 24 18.281V5.72C24 2.249 21.75 0 18.281 0zm1.964 4.078c-.271.73-.5 1.434-.68 2.11h4.587c.545-.006.445 1.168.445 1.171H9.384a58.104 58.104 0 01-.112 3.797h2.712c.388.023.393 1.251.393 1.266H9.183a9.223 9.223 0 01-.408 2.102l.757-.604c.452.456 1.512 1.712 1.906 2.177.473.681.063 2.081.063 2.081l-2.794-3.382c-.653 2.518-1.845 3.607-1.845 3.607-.523.468-1.58.82-2.64.516 2.218-1.73 3.44-3.917 3.667-6.497H4.491c0-.015.197-1.243.806-1.266h2.71c.024-.32.086-3.254.086-3.797H6.598c-.136.406-.158.447-.268.753-.594 1.095-1.603 1.122-1.907 1.155.906-1.821 1.416-3.6 1.591-4.064.425-1.124 1.671-1.125 1.671-1.125zM13.078 6h6.377v11.33h-2.573l-2.184 1.373-.401-1.373h-1.219zm1.313 1.219v8.86h.623l.263.937 1.455-.938h1.456v-8.86z"/>
                     </svg>
                 </span>
-                <span>知乎历史记录</span>
-                <span class="badge">即将推出</span>
+                <span>知乎历史</span>
+                <span class="badge" id="navZhihuCount">0</span>
             </div>
 
             <!-- Tab 4: 任务管理 (实时任务进度与调度队列) -->
@@ -727,11 +785,44 @@
 
                 <div class="search-control-bar">
                     <div class="search-input-group">
-                        <select class="search-source-select" id="searchSourceSelect" onchange="doSearch()">
-                            <option value="all">🌐 全部数据源</option>
-                            <option value="youtube" selected>📺 YouTube 台词</option>
-                            <option value="zhihu">💡 知乎历史记录</option>
-                        </select>
+                        <!-- 自定义带官方矢量 SVG 的下拉菜单 -->
+                        <div class="source-custom-select" id="sourceCustomSelect">
+                            <input type="hidden" id="searchSourceSelect" value="all">
+                            <div class="source-select-trigger" onclick="toggleSourceDropdown(event)">
+                                <span id="currentSourceIcon">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10"></circle>
+                                        <line x1="2" y1="12" x2="22" y2="12"></line>
+                                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                                    </svg>
+                                </span>
+                                <span id="currentSourceLabel">全部数据源</span>
+                                <span class="source-trigger-arrow">▼</span>
+                            </div>
+                            <div class="source-dropdown-menu">
+                                <div class="source-menu-item selected" data-value="all" onclick="selectSourceOption('all', '全部数据源', this)">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#475569" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10"></circle>
+                                        <line x1="2" y1="12" x2="22" y2="12"></line>
+                                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                                    </svg>
+                                    <span>全部数据源</span>
+                                </div>
+                                <div class="source-menu-item" data-value="youtube" onclick="selectSourceOption('youtube', 'YouTube 台词', this)">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+                                        <path fill="#FF0000" d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.5 12 3.5 12 3.5s-7.505 0-9.377.55a3.016 3.016 0 0 0-2.122 2.136C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.55 9.376.55 9.376.55s7.505 0 9.377-.55a3.016 3.016 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814z"/>
+                                        <path fill="#FFFFFF" d="m9.545 15.568 6.273-3.568-6.273-3.568v7.136z"/>
+                                    </svg>
+                                    <span>YouTube 台词</span>
+                                </div>
+                                <div class="source-menu-item" data-value="zhihu" onclick="selectSourceOption('zhihu', '知乎历史记录', this)">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+                                        <path fill="#0084FF" d="M5.721 0C2.251 0 0 2.25 0 5.719V18.28C0 21.751 2.252 24 5.721 24h12.56C21.751 24 24 21.75 24 18.281V5.72C24 2.249 21.75 0 18.281 0zm1.964 4.078c-.271.73-.5 1.434-.68 2.11h4.587c.545-.006.445 1.168.445 1.171H9.384a58.104 58.104 0 01-.112 3.797h2.712c.388.023.393 1.251.393 1.266H9.183a9.223 9.223 0 01-.408 2.102l.757-.604c.452.456 1.512 1.712 1.906 2.177.473.681.063 2.081.063 2.081l-2.794-3.382c-.653 2.518-1.845 3.607-1.845 3.607-.523.468-1.58.82-2.64.516 2.218-1.73 3.44-3.917 3.667-6.497H4.491c0-.015.197-1.243.806-1.266h2.71c.024-.32.086-3.254.086-3.797H6.598c-.136.406-.158.447-.268.753-.594 1.095-1.603 1.122-1.907 1.155.906-1.821 1.416-3.6 1.591-4.064.425-1.124 1.671-1.125 1.671-1.125zM13.078 6h6.377v11.33h-2.573l-2.184 1.373-.401-1.373h-1.219zm1.313 1.219v8.86h.623l.263.937 1.455-.938h1.456v-8.86z"/>
+                                    </svg>
+                                    <span>知乎历史记录</span>
+                                </div>
+                            </div>
+                        </div>
                         <div class="search-input-wrapper">
                             <span class="search-icon">
                                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">

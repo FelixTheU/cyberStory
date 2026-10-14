@@ -51,6 +51,45 @@ async function initServiceStatus() {
     }
 }
 
+// ─── 搜索源下拉菜单控制 ───
+function toggleSourceDropdown(e) {
+    if (e) e.stopPropagation();
+    const dropdown = document.getElementById('sourceCustomSelect');
+    if (dropdown) dropdown.classList.toggle('open');
+}
+
+function selectSourceOption(val, label, el) {
+    const input = document.getElementById('searchSourceSelect');
+    if (input) input.value = val;
+    const labelEl = document.getElementById('currentSourceLabel');
+    if (labelEl) labelEl.textContent = label;
+    
+    // 更新图标
+    const iconContainer = document.getElementById('currentSourceIcon');
+    const clickedSvg = el.querySelector('svg');
+    if (iconContainer && clickedSvg) {
+        iconContainer.innerHTML = clickedSvg.outerHTML;
+    }
+
+    // 更新选中样式
+    document.querySelectorAll('.source-menu-item').forEach(m => m.classList.remove('selected'));
+    el.classList.add('selected');
+
+    const dropdown = document.getElementById('sourceCustomSelect');
+    if (dropdown) dropdown.classList.remove('open');
+
+    // 触发搜索
+    doSearch();
+}
+
+// 点击空白关闭下拉菜单
+document.addEventListener('click', (e) => {
+    const dropdown = document.getElementById('sourceCustomSelect');
+    if (dropdown && !dropdown.contains(e.target)) {
+        dropdown.classList.remove('open');
+    }
+});
+
 // ─── 2. 视图 Tab 切换 ───
 function switchMainTab(tabId) {
     currentTab = tabId;
@@ -153,8 +192,9 @@ function renderSearchResults(items, keyword) {
 
     let html = '';
     items.forEach((item, idx) => {
-        const isFirst = idx === 0;
-        const durationStr = formatSeconds(item.duration_sec);
+        const isShort = (item.url && item.url.includes('/shorts/')) || (item.author === 'YouTube Shorts');
+        const durText = escapeHtml(item.duration_str || formatSeconds(item.duration_sec));
+        const durationLabel = isShort ? `Shorts · ${durText}` : durText;
         const sourceClass = item.source === 'zhihu' ? 'zhihu' : 'yt';
         const sourceName = item.source === 'zhihu' ? '知乎' : 'YouTube';
 
@@ -163,7 +203,7 @@ function renderSearchResults(items, keyword) {
                 <div class="result-top">
                     <div class="result-thumb">
                         <img src="${escapeHtml(item.thumbnail_url)}" alt="thumb" loading="lazy" onerror="this.src='https://placehold.co/120x68?text=Video'">
-                        <span class="result-duration">${escapeHtml(durationStr)}</span>
+                        <span class="result-duration" style="${isShort ? 'background:#be185d;' : ''}">${durationLabel}</span>
                     </div>
                     <div class="result-info">
                         <div class="result-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
@@ -291,7 +331,9 @@ function renderYtFeed(groups) {
             const isActive = ytActiveItemId === itemId ? 'active' : '';
             if (!firstReadyItem && item.status === 'ready') firstReadyItem = item;
             const isShort = (item.url && item.url.includes('/shorts/')) || (item.author === 'YouTube Shorts');
-            const durationLabel = isShort ? 'Shorts' : escapeHtml(item.duration_str);
+            // 显示真实时长，如果是 Shorts 则额外加上 [Shorts] 标识
+            const durText = escapeHtml(item.duration_str || '00:00');
+            const durationLabel = isShort ? `Shorts · ${durText}` : durText;
 
             let badgeHtml = '';
             let progressHtml = '';
@@ -453,13 +495,20 @@ function renderTaskList(tasks) {
 
     let html = '';
     tasks.forEach(task => {
-        const isProcessing = task.status === 'processing';
+        const isProcessing = ['processing', 'transcribing', 'downloading'].includes(task.status);
+        const isAudioReady = task.status === 'audio_ready';
         const isShort = (task.url && task.url.includes('/shorts/')) || (task.author === 'YouTube Shorts');
-        const durationLabel = isShort ? 'Shorts' : escapeHtml(task.duration_str);
+        const durText = escapeHtml(task.duration_str || '00:00');
+        const durationLabel = isShort ? `Shorts · ${durText}` : durText;
 
-        const statusTag = isProcessing
-            ? `<span class="badge-tag tag-processing" style="background:#fef3c7; color:#b45309; font-weight:700;">⚡ 转写进行中</span>`
-            : `<span class="badge-tag tag-pending">⏳ 排队等待中</span>`;
+        let statusTag = `<span class="badge-tag tag-pending">⏳ 排队等待中</span>`;
+        if (task.status === 'downloading') {
+            statusTag = `<span class="badge-tag tag-processing" style="background:#e0f2fe; color:#0369a1; font-weight:700;">📥 音频下载中</span>`;
+        } else if (task.status === 'audio_ready') {
+            statusTag = `<span class="badge-tag tag-processing" style="background:#dbeafe; color:#1d4ed8; font-weight:700;">🎵 音频就绪待转写</span>`;
+        } else if (task.status === 'transcribing' || task.status === 'processing') {
+            statusTag = `<span class="badge-tag tag-processing" style="background:#fef3c7; color:#b45309; font-weight:700;">⚡ ASR 转写中</span>`;
+        }
 
         const stepText = task.current_step || (isProcessing ? '处理准备中' : '排队中');
         const pct = (typeof task.progress_pct === 'number' && task.progress_pct > 0) ? task.progress_pct : (isProcessing ? 10 : 0);

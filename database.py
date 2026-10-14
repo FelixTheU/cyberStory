@@ -203,6 +203,24 @@ def get_next_pending_item() -> Optional[Dict[str, Any]]:
     conn.close()
     return dict(row) if row else None
 
+
+def get_next_audio_ready_item() -> Optional[Dict[str, Any]]:
+    """获取准备好进入 ASR 推理的任务 (状态为 audio_ready)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT ts_id, ts_id AS id, source, source_id, title, author, url, duration_sec, cost_time_sec
+    FROM items
+    WHERE status = 'audio_ready'
+    ORDER BY
+        CASE WHEN duration_sec <= 0 THEN 999999 ELSE duration_sec END ASC,
+        ts_id DESC
+    LIMIT 1;
+    """)
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
 def update_item_status(item_id: int, status: str, error_message: Optional[str] = None, sub_source: Optional[str] = None, progress_pct: Optional[int] = None, cost_time_sec: Optional[float] = None, current_step: Optional[str] = None):
     conn = get_connection()
     cursor = conn.cursor()
@@ -534,9 +552,14 @@ def get_tasks() -> Dict[str, Any]:
            watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at,
            (strftime('%s', 'now') - strftime('%s', updated_at)) as live_elapsed_sec
     FROM items
-    WHERE status IN ('processing', 'pending')
-    ORDER BY 
-        CASE WHEN status = 'processing' THEN 0 ELSE 1 END ASC,
+    WHERE status IN ('processing', 'pending', 'downloading', 'audio_ready', 'transcribing')
+    ORDER BY
+        CASE 
+            WHEN status IN ('processing', 'transcribing') THEN 0 
+            WHEN status = 'downloading' THEN 1
+            WHEN status = 'audio_ready' THEN 2
+            ELSE 3 
+        END ASC,
         CASE WHEN duration_sec <= 0 THEN 999999 ELSE duration_sec END ASC,
         ts_id DESC
     LIMIT 200;

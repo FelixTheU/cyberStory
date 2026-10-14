@@ -52,7 +52,7 @@ def process_item(item: Dict[str, Any]):
 
 
 def try_fetch_subtitles(video_id: str) -> Optional[List[Dict[str, Any]]]:
-    """使用 yt-dlp 抓取原生字幕"""
+    """使用 yt-dlp 抓取原生/机翻字幕 (精确指定中英文言代码，避免 .* 导致 429 风控与超时)"""
     subs_dir = config.TEMP_DIR / "subs"
     subs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -61,10 +61,8 @@ def try_fetch_subtitles(video_id: str) -> Optional[List[Dict[str, Any]]]:
         str(ytdlp_bin),
         "--skip-download",
         "--write-sub", "--write-auto-sub",
-        "--sub-lang", "zh-Hans,zh,zh-Hant,en,zh-Hans-zh,zh-Hant-zh,.*zh.*,.*en.*",
+        "--sub-lang", "zh-Hans,zh,zh-Hant,en",
         "--sub-format", "vtt",
-        "--js-runtimes", "node:C:/Program Files/nodejs/node.exe",
-        "--remote-components", "ejs:github",
         "-o", str(subs_dir / f"{video_id}.%(ext)s"),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
@@ -78,9 +76,9 @@ def try_fetch_subtitles(video_id: str) -> Optional[List[Dict[str, Any]]]:
         cmd.insert(2, config.PROXY_URL)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        logger.warning(f"yt-dlp failed for {video_id}: {e}")
+        logger.warning(f"yt-dlp subtitle fetch failed for {video_id}: {e}")
         return None
 
     # 查找生成的 .vtt 文件
@@ -88,16 +86,17 @@ def try_fetch_subtitles(video_id: str) -> Optional[List[Dict[str, Any]]]:
     if not vtt_files:
         return None
 
-    # 优先中文
+    # 优先级：zh-Hans > zh > zh-Hant > en
     chosen = vtt_files[0]
-    for f in vtt_files:
-        if "zh" in f.stem.lower():
-            chosen = f
+    for lang_code in ["zh-hans", "zh", "zh-hant", "en"]:
+        matched = [f for f in vtt_files if lang_code in f.stem.lower()]
+        if matched:
+            chosen = matched[0]
             break
 
     segments = parse_vtt(chosen)
 
-    # 清理临时文件
+    # 立即清理临时字幕文件
     for f in vtt_files:
         try:
             f.unlink()
@@ -149,28 +148,22 @@ def parse_vtt(vtt_path: Path) -> List[Dict[str, Any]]:
     return segments
 
 
-def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[List[Dict[str, Any]]]:
-    """使用 faster-whisper 进行本地 ASR 转写 (完整音频转录，保留 CPU 限流与 VAD 加速)"""
+def download_audio_file(video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[Path]:
+    """下载阶段：拉取完整音频文件，不截断。下载成功返回本地音频路径，失败返回 None"""
     audio_dir = config.TEMP_DIR / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. 设置当前进程为低于正常优先级 (BELOW_NORMAL_PRIORITY_CLASS)，避免 ASR 抢占前台交互
-    try:
-        import psutil
-        p = psutil.Process()
-        if hasattr(psutil, "BELOW_NORMAL_PRIORITY_CLASS"):
-            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
-    except Exception:
-        pass
-
-    # 2. 完整音频下载：不截断，拉取全长音频
     ytdlp_bin = getattr(config, "YT_DLP_BIN", "yt-dlp")
     audio_path = audio_dir / f"{video_id}.opus"
+    
+    # 若本地已有此前下载好的音频文件则复用
+    actual_files = list(audio_dir.glob(f"{video_id}.*"))
+    if actual_files and actual_files[0].stat().st_size > 1024:
+        return actual_files[0]
+
     cmd = [
         str(ytdlp_bin),
         "-x", "--audio-format", "opus", "--audio-quality", "0",
-        "--js-runtimes", "node:C:/Program Files/nodejs/node.exe",
-        "--remote-components", "ejs:github",
         "-o", str(audio_path),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
@@ -189,12 +182,20 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
         logger.warning(f"Audio download failed for {video_id}: {e}")
         return None
 
-    # 查找实际输出文件
     actual_files = list(audio_dir.glob(f"{video_id}.*"))
-    if not actual_files:
-        return None
+    return actual_files[0] if actual_files else None
 
-    actual_path = actual_files[0]
+
+def transcribe_audio_file(audio_path: Path, video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[List[Dict[str, Any]]]:
+    """ASR 阶段：使用 faster-whisper 转录本地音频，并在完成后强制删除音频文件"""
+    # 限制进程优先级为低于正常
+    try:
+        import psutil
+        p = psutil.Process()
+        if hasattr(psutil, "BELOW_NORMAL_PRIORITY_CLASS"):
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
 
     try:
         if item_id:
@@ -202,7 +203,6 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
             database.update_item_status(item_id, status="processing", current_step="Whisper模型加载", progress_pct=40, cost_time_sec=elapsed)
 
         from faster_whisper import WhisperModel
-        # 显式限制 CPU 核心数 (默认 2 线程) 与 worker 数，防止跑满宿主机 CPU
         model = WhisperModel(
             config.WHISPER_MODEL,
             device=config.WHISPER_DEVICE,
@@ -216,9 +216,9 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
             database.update_item_status(item_id, status="processing", current_step="Whisper语音推理中", progress_pct=50, cost_time_sec=elapsed)
 
         segments_gen, info = model.transcribe(
-            str(actual_path),
+            str(audio_path),
             beam_size=5,
-            vad_filter=True, # 启用 VAD 静音切除，提升转写效率并跳过长静音
+            vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500)
         )
 
@@ -232,7 +232,6 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
                 "end": seg.end,
                 "text": seg.text.strip()
             })
-            # 动态更新进度 (50% ~ 95%)
             now = time.time()
             if item_id and total_duration > 0 and (now - last_progress_update > 3.0):
                 last_progress_update = now
@@ -247,8 +246,18 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
         logger.warning("faster-whisper not installed, skipping ASR")
         return None
     finally:
-        # 清理音频文件
+        # ASR 完成或异常后，立即彻底清理本地音频文件
         try:
-            actual_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+            if audio_path and audio_path.exists():
+                audio_path.unlink(missing_ok=True)
+                logger.info(f"Cleaned up audio file: {audio_path.name}")
+        except Exception as e:
+            logger.warning(f"Failed to delete audio file {audio_path}: {e}")
+
+
+def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[List[Dict[str, Any]]]:
+    """单 worker 模式兼容入口：串联下载与 ASR"""
+    audio_path = download_audio_file(video_id, item_id=item_id, t0=t0)
+    if not audio_path:
+        return None
+    return transcribe_audio_file(audio_path, video_id, item_id=item_id, t0=t0)

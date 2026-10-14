@@ -3,8 +3,9 @@ CyberHistoryExplorer — FastAPI 主入口与路由服务
 """
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 
 from fastapi import FastAPI, Query, HTTPException
@@ -34,32 +35,123 @@ class VideoMeta(BaseModel):
 class SyncRequest(BaseModel):
     items: List[VideoMeta]
 
-# --- Background Worker ---
+# --- Background Multi-Workers (解耦音频下载 worker 与 ASR worker) ---
 
-worker_task: Optional[asyncio.Task] = None
+download_worker_task: Optional[asyncio.Task] = None
+asr_worker_task: Optional[asyncio.Task] = None
 
-async def pipeline_worker():
-    """后台串行处理 pending 项目（字幕抓取/ASR）"""
-    from pipeline import process_item
-    logger.info("Pipeline worker started")
+def run_download_job(item: Dict[str, Any]):
+    """下载 Worker 任务函数：首先尝试抓取原生字幕，若无则拉取音频并将状态流转至 audio_ready"""
+    from pipeline import try_fetch_subtitles, download_audio_file
+    source_id = item["source_id"]
+    item_id = item.get("ts_id") or item["id"]
+    t0 = time.time()
+
+    database.update_item_status(item_id, status="downloading", current_step="检测字幕", progress_pct=15)
+
+    # 1. 优先尝试原生字幕
+    segments = try_fetch_subtitles(source_id)
+    if segments:
+        cost = time.time() - t0
+        logger.info(f"[{source_id}] Download worker got subtitles: {len(segments)} segments in {cost:.1f}s")
+        database.save_subtitles_and_index(item_id, segments, "native", cost_time_sec=cost)
+        return
+
+    # 2. 无原生字幕，执行音频下载
+    database.update_item_status(item_id, status="downloading", current_step="音频下载中", progress_pct=30)
+    audio_path = download_audio_file(source_id, item_id=item_id, t0=t0)
+    cost = time.time() - t0
+
+    if audio_path and audio_path.exists():
+        logger.info(f"[{source_id}] Audio downloaded in {cost:.1f}s, transitioning to audio_ready")
+        database.update_item_status(item_id, status="audio_ready", current_step="音频就绪待转写", progress_pct=35, cost_time_sec=cost)
+    else:
+        logger.warning(f"[{source_id}] Audio download failed, indexing title only")
+        database.save_subtitles_and_index(item_id, [], "none", cost_time_sec=cost)
+
+
+def run_asr_job(item: Dict[str, Any]):
+    """ASR Worker 任务函数：从 audio_ready 任务池取走音频进行 Whisper 转录，完成后强制删除本地音频文件"""
+    from pipeline import transcribe_audio_file
+    source_id = item["source_id"]
+    item_id = item.get("ts_id") or item["id"]
+    t0 = time.time() - float(item.get("cost_time_sec") or 0.0)
+
+    audio_dir = config.TEMP_DIR / "audio"
+    audio_files = list(audio_dir.glob(f"{source_id}.*"))
+    if not audio_files:
+        logger.warning(f"[{source_id}] Audio file missing for ASR, re-marking as pending")
+        database.update_item_status(item_id, status="pending", current_step="等待重新下载", progress_pct=0)
+        return
+
+    audio_path = audio_files[0]
+    database.update_item_status(item_id, status="transcribing", current_step="Whisper模型加载", progress_pct=40)
+
+    try:
+        segments = transcribe_audio_file(audio_path, source_id, item_id=item_id, t0=t0)
+        cost = time.time() - t0
+        if segments:
+            logger.info(f"[{source_id}] ASR worker completed: {len(segments)} segments in {cost:.1f}s")
+            database.save_subtitles_and_index(item_id, segments, "asr", cost_time_sec=cost)
+        else:
+            logger.warning(f"[{source_id}] ASR produced no segments, indexing title only")
+            database.save_subtitles_and_index(item_id, [], "none", cost_time_sec=cost)
+    except Exception as e:
+        logger.error(f"[{source_id}] ASR worker failed: {e}")
+        database.update_item_status(item_id, status="failed", error_message=str(e))
+    finally:
+        # 确保音频文件被彻底删除
+        try:
+            if audio_path.exists():
+                audio_path.unlink(missing_ok=True)
+                logger.info(f"Cleaned up audio file: {audio_path.name}")
+        except Exception:
+            pass
+
+
+async def download_worker():
+    """Worker 1: 专用音频下载与字幕提取，高 I/O 并发"""
+    logger.info("Download worker started")
     while True:
         try:
             item = database.get_next_pending_item()
             if item:
-                logger.info(f"Processing: [{item['source_id']}] {item['title']}")
-                database.update_item_status(item["id"], "processing", current_step="准备处理", progress_pct=5)
+                logger.info(f"[DownloadWorker] Picked [{item['source_id']}] {item['title'][:30]}")
                 try:
-                    await asyncio.get_event_loop().run_in_executor(None, process_item, item)
+                    await asyncio.get_event_loop().run_in_executor(None, run_download_job, item)
                 except Exception as e:
-                    logger.error(f"Failed to process {item['source_id']}: {e}")
+                    logger.error(f"[DownloadWorker] Failed {item['source_id']}: {e}")
                     database.update_item_status(item["id"], "failed", str(e))
-                # 防风控延迟
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
             else:
-                await asyncio.sleep(10)
+                await asyncio.sleep(6)
         except Exception as e:
-            logger.error(f"Worker loop error: {e}")
-            await asyncio.sleep(10)
+            logger.error(f"[DownloadWorker] Loop error: {e}")
+            await asyncio.sleep(6)
+
+
+async def asr_worker():
+    """Worker 2: 专用 faster-whisper ASR 转写，独立调度，CPU 受控"""
+    logger.info("ASR worker started")
+    while True:
+        try:
+            item = database.get_next_audio_ready_item()
+            if item:
+                logger.info(f"[ASRWorker] Picked [{item['source_id']}] {item['title'][:30]}")
+                # 立即把状态标记为 transcribing，防止下一轮重复取同一个任务
+                database.update_item_status(item["id"], status="transcribing", current_step="Whisper模型加载", progress_pct=40)
+                try:
+                    await asyncio.get_event_loop().run_in_executor(None, run_asr_job, item)
+                except Exception as e:
+                    logger.error(f"[ASRWorker] Failed {item['source_id']}: {e}")
+                    database.update_item_status(item["id"], "failed", str(e))
+                await asyncio.sleep(1)
+            else:
+                await asyncio.sleep(4)
+        except Exception as e:
+            logger.error(f"[ASRWorker] Loop error: {e}")
+            await asyncio.sleep(4)
+
 
 # --- Lifespan ---
 
@@ -67,12 +159,15 @@ async def pipeline_worker():
 async def lifespan(app: FastAPI):
     database.init_db()
     logger.info(f"Database initialized at {config.DB_PATH}")
-    global worker_task
-    worker_task = asyncio.create_task(pipeline_worker())
+    global download_worker_task, asr_worker_task
+    download_worker_task = asyncio.create_task(download_worker())
+    asr_worker_task = asyncio.create_task(asr_worker())
     logger.info(f"CyberHistoryExplorer running at http://{config.HOST}:{config.PORT}")
     yield
-    if worker_task:
-        worker_task.cancel()
+    if download_worker_task:
+        download_worker_task.cancel()
+    if asr_worker_task:
+        asr_worker_task.cancel()
 
 # --- App ---
 

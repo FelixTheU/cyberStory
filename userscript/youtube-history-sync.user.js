@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         cyberstory - YouTube History Sync
 // @namespace    https://cyberstory.local
-// @version      1.6.0
-// @description  自动扫描 YouTube 历史记录 (工作前自动刷新以获取最新历史，绝对 ts-id 与 range 智能差量探测入库)
+// @version      1.6.1
+// @description  自动扫描 YouTube 历史记录 (工作前自动刷新以获取最新历史，绝对 ts-id 与 range 智能差量探测入库，精准解析时长)
 // @author       cyberstory
 // @match        https://www.youtube.com/feed/history*
 // @grant        GM_getValue
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '1.6.0';
+    const SCRIPT_VERSION = '1.6.1';
     const API_BASE = 'http://127.0.0.1:8765';
     const SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟轮询
 
@@ -310,10 +310,21 @@
 
     function parseDuration(str) {
         if (!str) return 0;
-        const parts = str.trim().split(':').map(Number);
-        if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-        if (parts.length === 2) return parts[0] * 60 + parts[1];
-        return 0;
+        // 支持标准时间格式 "01:23", "1:23:45"
+        if (str.includes(':')) {
+            const parts = str.trim().split(':').map(Number);
+            if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+            if (parts.length === 2) return parts[0] * 60 + parts[1];
+        }
+        // 支持自然语言格式，如 "24分钟11秒钟", "17 minutes, 35 seconds"
+        let sec = 0;
+        const hMatch = str.match(/(\d+)\s*(?:小时|hour|hr)/i);
+        const mMatch = str.match(/(\d+)\s*(?:分钟|分|minute|min)/i);
+        const sMatch = str.match(/(\d+)\s*(?:秒钟|秒|second|sec)/i);
+        if (hMatch) sec += parseInt(hMatch[1], 10) * 3600;
+        if (mMatch) sec += parseInt(mMatch[1], 10) * 60;
+        if (sMatch) sec += parseInt(sMatch[1], 10);
+        return sec;
     }
 
     // ─── 4. 核心算法：组内倒序生成 seq，计算全局唯一绝对 ts_id ───
@@ -377,12 +388,40 @@
                     const metaTexts = card.querySelectorAll('.ytContentMetadataViewModelMetadataText, #channel-name, .ytd-channel-name');
                     if (metaTexts.length > 0) channel = metaTexts[0].textContent.trim();
 
-                    const links = Array.from(card.querySelectorAll('a[href*="/watch?v="]'));
-                    for (const l of links) {
-                        const t = l.textContent.trim();
-                        if (/^\d+(:\d+)+$/.test(t)) {
+                    // 1. 查找包含数字冒号的角标元素 (badge-shape, ytd-thumbnail-overlay-time-status-renderer 等)
+                    const badges = Array.from(card.querySelectorAll('badge-shape, .badge-shape-wiz__text, .ytd-thumbnail-overlay-time-status-renderer, span'));
+                    for (const b of badges) {
+                        const t = b.textContent.trim();
+                        if (/^\d+(:[0-5]?\d)+$/.test(t)) {
                             duration_sec = parseDuration(t);
                             break;
+                        }
+                    }
+
+                    // 2. 若角标未取到，查找 aria-label 属性中的时间描述
+                    if (duration_sec === 0) {
+                        const ariaEls = Array.from(card.querySelectorAll('[aria-label]'));
+                        for (const a of ariaEls) {
+                            const label = a.getAttribute('aria-label') || '';
+                            if (label.includes('分钟') || label.includes('秒') || label.includes('minute') || label.includes('second')) {
+                                const parsed = parseDuration(label);
+                                if (parsed > 0) {
+                                    duration_sec = parsed;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. 兜底检查链接文本
+                    if (duration_sec === 0) {
+                        const links = Array.from(card.querySelectorAll('a[href*="/watch?v="]'));
+                        for (const l of links) {
+                            const t = l.textContent.trim();
+                            if (/^\d+(:[0-5]?\d)+$/.test(t)) {
+                                duration_sec = parseDuration(t);
+                                break;
+                            }
                         }
                     }
                 } else {
