@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         cyberstory - YouTube History Sync
 // @namespace    https://cyberstory.local
-// @version      1.1.0
-// @description  自动扫描 YouTube 历史记录并同步至本地 cyberstory 服务
+// @version      1.2.0
+// @description  自动扫描 YouTube 历史记录 (含长视频与 Shorts) 并严格按浏览次序同步至本地 cyberstory 服务
 // @author       cyberstory
 // @match        https://www.youtube.com/feed/history*
 // @grant        GM_getValue
@@ -15,11 +15,11 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '1.1.0';
+    const SCRIPT_VERSION = '1.2.0';
     const API_BASE = 'http://127.0.0.1:8765';
     const SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟
     const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 小时无新视频则刷新
-    const MAX_SYNCED_IDS = 100;
+    const MAX_SYNCED_IDS = 200;
 
     let syncing = false;
     let lastNewCount = 0;
@@ -108,62 +108,85 @@
         return 0;
     }
 
-    // ─── DOM Parsing ───
+    // ─── 核心 DOM 解析：严格按照自上而下文档流捕获长视频与 Shorts ───
     function parseHistoryCards() {
-        const cards = document.querySelectorAll('yt-lockup-view-model, ytd-video-renderer');
+        const sections = Array.from(document.querySelectorAll('ytd-item-section-renderer'));
         const results = [];
+        const seen = new Set();
+        let seq = 1;
 
-        cards.forEach(card => {
-            const links = Array.from(card.querySelectorAll('a[href*="/watch?v="]'));
-            if (!links.length) return;
+        sections.forEach(sec => {
+            const headerEl = sec.querySelector('#header, #title, #header-text, h2');
+            let dateLabel = headerEl ? headerEl.textContent.trim() : '';
+            if (!dateLabel || dateLabel === 'Shorts') dateLabel = '未知日期';
 
-            let videoId = null;
-            for (const l of links) {
-                const m = l.href.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
-                if (m) { videoId = m[1]; break; }
-            }
-            if (!videoId) return;
+            const cards = sec.querySelectorAll('yt-lockup-view-model, ytd-video-renderer, ytm-shorts-lockup-view-model, ytd-reel-item-renderer, yt-shorts-lockup-view-model');
 
-            let durationText = '';
-            let title = '';
-            
-            for (const l of links) {
-                const t = l.textContent.trim();
-                if (/^\d+(:\d+)+$/.test(t)) {
-                    durationText = t;
-                } else if (t.length > title.length) {
-                    title = t;
+            cards.forEach(card => {
+                const watchLink = card.querySelector('a[href*="/watch?v="]');
+                const shortsLink = card.querySelector('a[href*="/shorts/"]');
+
+                let videoId = null;
+                let isShort = false;
+                let link = null;
+
+                if (watchLink) {
+                    const m = watchLink.href.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+                    if (m) { videoId = m[1]; link = watchLink; }
+                } else if (shortsLink) {
+                    const m = shortsLink.href.match(/\/shorts\/([a-zA-Z0-9_-]{11})/);
+                    if (m) { videoId = m[1]; isShort = true; link = shortsLink; }
                 }
-            }
 
-            let channel = '';
-            const metaTexts = card.querySelectorAll('.ytContentMetadataViewModelMetadataText, #channel-name, .ytd-channel-name');
-            if (metaTexts.length > 0) {
-                channel = metaTexts[0].textContent.trim();
-            }
+                if (!videoId || seen.has(videoId)) return;
+                seen.add(videoId);
 
-            let watchedDate = '';
-            let parent = card.parentElement;
-            while (parent && parent !== document.body) {
-                const titleHeader = parent.querySelector('#title, .section-title, h2, #header-text');
-                if (titleHeader && titleHeader.textContent.trim()) {
-                    const hText = titleHeader.textContent.trim();
-                    if (hText.includes('今天') || hText.includes('昨天') || hText.includes('月') || hText.includes('年') || hText.includes('Today') || hText.includes('Yesterday')) {
-                        watchedDate = hText;
-                        break;
+                let title = '';
+                const titleEl = card.querySelector('h3, #video-title, .yt-core-attributed-string');
+                if (titleEl) title = titleEl.textContent.trim();
+                if (!title && link) {
+                    title = link.getAttribute('aria-label') || link.textContent.trim() || '';
+                }
+
+                let channel = '';
+                let duration_sec = isShort ? 60 : 0;
+
+                if (!isShort) {
+                    const metaTexts = card.querySelectorAll('.ytContentMetadataViewModelMetadataText, #channel-name, .ytd-channel-name');
+                    if (metaTexts.length > 0) channel = metaTexts[0].textContent.trim();
+
+                    const links = Array.from(card.querySelectorAll('a[href*="/watch?v="]'));
+                    for (const l of links) {
+                        const t = l.textContent.trim();
+                        if (/^\d+(:\d+)+$/.test(t)) {
+                            duration_sec = parseDuration(t);
+                            break;
+                        }
+                    }
+                } else {
+                    channel = 'YouTube Shorts';
+                    const metaTexts = card.querySelectorAll('.ytContentMetadataViewModelMetadataText, span');
+                    for (const m of metaTexts) {
+                        const t = m.textContent.trim();
+                        if (t.includes('次观看') || t.includes('views')) continue;
+                        if (t.length > 1 && t.length < 25 && t !== title) {
+                            channel = t;
+                            break;
+                        }
                     }
                 }
-                parent = parent.parentElement;
-            }
 
-            results.push({
-                videoId,
-                title,
-                channel,
-                url: `https://www.youtube.com/watch?v=${videoId}`,
-                duration_sec: parseDuration(durationText),
-                thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-                watchedDate
+                results.push({
+                    seq_order: seq++,
+                    videoId,
+                    title: title.slice(0, 150),
+                    channel: channel || (isShort ? 'YouTube Shorts' : 'YouTube'),
+                    url: isShort ? `https://www.youtube.com/shorts/${videoId}` : `https://www.youtube.com/watch?v=${videoId}`,
+                    duration_sec,
+                    thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+                    watchedDate: dateLabel,
+                    is_short: isShort
+                });
             });
         });
 
@@ -196,52 +219,19 @@
                 return;
             }
 
-            // 存储机制（兼容 GM_getValue 或 localStorage）
-            let syncedIds = [];
-            try {
-                if (typeof GM_getValue !== 'undefined') {
-                    syncedIds = GM_getValue('last_synced_video_ids', []);
-                } else {
-                    syncedIds = JSON.parse(localStorage.getItem('ch_synced_video_ids') || '[]');
-                }
-            } catch {
-                syncedIds = [];
-            }
-
-            const syncedSet = new Set(syncedIds);
-            const newVideos = [];
-            for (const v of allVideos) {
-                if (syncedSet.has(v.videoId)) break;
-                newVideos.push(v);
-            }
-
-            // 如果全都在已同步列表，但用户点击了立即同步，依然上报所有视频以确保服务端同步
-            const toSend = newVideos.length > 0 ? newVideos : allVideos;
-
-            // 上报
+            // 上报全部已扫描条目 (支持更新既有记录的最新顺序与日期)
             const resp = await fetch(`${API_BASE}/api/sync/youtube`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ items: toSend })
+                body: JSON.stringify({ items: allVideos })
             });
             const result = await resp.json();
 
-            // 更新滑动窗口
-            const newIds = toSend.map(v => v.videoId);
-            const updatedIds = [...newIds, ...syncedIds.filter(id => !newIds.includes(id))].slice(0, MAX_SYNCED_IDS);
-            try {
-                if (typeof GM_setValue !== 'undefined') {
-                    GM_setValue('last_synced_video_ids', updatedIds);
-                } else {
-                    localStorage.setItem('ch_synced_video_ids', JSON.stringify(updatedIds));
-                }
-            } catch {}
-
-            lastNewCount = result.inserted !== undefined ? result.inserted : toSend.length;
+            lastNewCount = result.inserted !== undefined ? result.inserted : allVideos.length;
             lastNewTime = Date.now();
 
             const nextTime = new Date(Date.now() + SYNC_INTERVAL_MS).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-            if (statusEl) statusEl.textContent = `CyberHistory: 已同步 ${lastNewCount} 条 | 下次: ${nextTime}`;
+            if (statusEl) statusEl.textContent = `CyberHistory: 已同步 ${allVideos.length} 条 (新增${result.inserted || 0}) | 下次: ${nextTime}`;
         } catch (err) {
             if (statusEl) statusEl.textContent = `CyberHistory: 同步失败 (${err.message})`;
         }
@@ -250,7 +240,6 @@
         if (syncBtn) syncBtn.disabled = false;
     }
 
-    // 挂载到全局方便测试/调用
     window.__cyberHistorySync = doSync;
 
     // ─── Scheduling ───

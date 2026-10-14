@@ -271,18 +271,24 @@ function renderYtFeed(groups) {
         group.items.forEach(item => {
             const isActive = ytActiveItemId === item.id ? 'active' : '';
             if (!firstReadyItem && item.status === 'ready') firstReadyItem = item;
+            const isShort = (item.url && item.url.includes('/shorts/')) || (item.author === 'YouTube Shorts');
+            const durationLabel = isShort ? 'Shorts' : escapeHtml(item.duration_str);
 
             // 状态徽标与步骤耗时
             let badgeHtml = '';
             let progressHtml = '';
 
+            if (isShort) {
+                badgeHtml += `<span class="badge-tag" style="background:#fce7f3; color:#be185d;">📱 Shorts</span>`;
+            }
+
             if (item.status === 'ready') {
                 if (item.sub_source === 'native') {
-                    badgeHtml = `<span class="badge-tag tag-native">📝 原生官方字幕</span>`;
+                    badgeHtml += `<span class="badge-tag tag-native">📝 原生官方字幕</span>`;
                 } else if (item.sub_source === 'asr') {
-                    badgeHtml = `<span class="badge-tag tag-asr">🎙 AI转写完成</span>`;
+                    badgeHtml += `<span class="badge-tag tag-asr">🎙 AI转写完成</span>`;
                 } else {
-                    badgeHtml = `<span class="badge-tag tag-pending">纯标题 (无字幕)</span>`;
+                    badgeHtml += `<span class="badge-tag tag-pending">纯标题 (无字幕)</span>`;
                 }
                 if (item.cost_time_str) {
                     badgeHtml += `<span style="font-size:10px; color:#94a3b8;">耗时 ${escapeHtml(item.cost_time_str)}</span>`;
@@ -291,7 +297,7 @@ function renderYtFeed(groups) {
                 const stepText = item.current_step || '排队准备中';
                 const pct = (typeof item.progress_pct === 'number' && item.progress_pct > 0) ? item.progress_pct : 5;
                 const elapsedStr = item.cost_time_str ? `已耗时 ${item.cost_time_str}` : '刚刚开始';
-                badgeHtml = `<span class="badge-tag tag-processing">⚡ ${escapeHtml(stepText)}</span>`;
+                badgeHtml += `<span class="badge-tag tag-processing">⚡ ${escapeHtml(stepText)}</span>`;
                 progressHtml = `
                     <div class="progress-block">
                         <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -304,16 +310,16 @@ function renderYtFeed(groups) {
                     </div>
                 `;
             } else if (item.status === 'failed') {
-                badgeHtml = `<span class="badge-tag tag-failed">❌ 处理失败</span>`;
+                badgeHtml += `<span class="badge-tag tag-failed">❌ 处理失败</span>`;
             } else {
-                badgeHtml = `<span class="badge-tag tag-pending">⏳ 待处理 (排队中)</span>`;
+                badgeHtml += `<span class="badge-tag tag-pending">⏳ 待处理 (排队中)</span>`;
             }
 
             html += `
                 <div class="history-card ${isActive}" id="yt-card-${item.id}" onclick="selectYtHistoryItem(${item.id})">
                     <div class="result-thumb">
                         <img src="${escapeHtml(item.thumbnail_url)}" alt="thumb" loading="lazy" onerror="this.src='https://placehold.co/120x68?text=Video'">
-                        <span class="result-duration">${escapeHtml(item.duration_str)}</span>
+                        <span class="result-duration" style="${isShort ? 'background:#be185d;' : ''}">${durationLabel}</span>
                     </div>
                     <div class="result-info">
                         <div class="result-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>

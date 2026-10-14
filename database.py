@@ -87,11 +87,11 @@ def init_db():
     conn.close()
 
 def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
-    """批量插入新视频，已存在的自动忽略"""
+    """批量插入新视频，若已存在则更新其 watched_at 与 seq_order 保证最新浏览次序"""
     conn = get_connection()
     cursor = conn.cursor()
     inserted = 0
-    ignored = 0
+    updated = 0
     
     for item in items_data:
         source = item.get("source", "youtube")
@@ -104,23 +104,29 @@ def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
         duration_sec = int(item.get("duration_sec", 0))
         thumbnail_url = item.get("thumbnail") or item.get("thumbnail_url") or f"https://i.ytimg.com/vi/{source_id}/hqdefault.jpg"
         watched_at = item.get("watchedDate") or item.get("watched_at", "")
+        seq_order = int(item.get("seq_order", 0))
         
         try:
             cursor.execute("""
-            INSERT INTO items (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-            ON CONFLICT(source, source_id) DO NOTHING;
-            """, (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at))
+            INSERT INTO items (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, seq_order, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            ON CONFLICT(source, source_id) DO UPDATE SET
+                watched_at = excluded.watched_at,
+                seq_order = excluded.seq_order,
+                title = CASE WHEN items.title = '' THEN excluded.title ELSE items.title END,
+                author = CASE WHEN items.author = '' THEN excluded.author ELSE items.author END,
+                updated_at = CURRENT_TIMESTAMP;
+            """, (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, seq_order))
             if cursor.rowcount > 0:
                 inserted += 1
             else:
-                ignored += 1
+                updated += 1
         except Exception:
-            ignored += 1
+            pass
             
     conn.commit()
     conn.close()
-    return {"inserted": inserted, "ignored": ignored}
+    return {"inserted": inserted, "updated": updated}
 
 def get_next_pending_item() -> Optional[Dict[str, Any]]:
     conn = get_connection()
@@ -421,20 +427,25 @@ def parse_date_score(label: str) -> float:
     return 0.0
 
 def get_history_feed() -> List[Dict[str, Any]]:
-    """获取按日期分组的历史记录流 (最新日期在最前，组内按观看/入库倒序)"""
+    """获取按浏览次序严格对齐的历史记录流 (与浏览器文档流自上而下完全一致)"""
     conn = get_connection()
     cursor = conn.cursor()
+    # 严格按照从上往下的 seq_order ASC 排列 (0 或未设置的排在最后)
     cursor.execute("""
     SELECT id, source_id, title, author, url, duration_sec, thumbnail_url,
-           watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at,
+           watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at, seq_order,
            (strftime('%s', 'now') - strftime('%s', updated_at)) as live_elapsed_sec
     FROM items
-    ORDER BY id DESC;
+    ORDER BY 
+        CASE WHEN seq_order > 0 THEN 0 ELSE 1 END ASC,
+        seq_order ASC,
+        id DESC;
     """)
     rows = cursor.fetchall()
     
-    # 格式化数据并按 watched_at (日期标签如 '今天', '昨天', '9月11日' 等) 分组
+    # 按从上往下遍历到的先后顺序自然组织日期分组与组内条目
     groups_map = {}
+    ordered_groups = []
     
     for r in rows:
         d = dict(r)
@@ -442,7 +453,6 @@ def get_history_feed() -> List[Dict[str, Any]]:
         
         # 格式化耗时
         cost_sec = d.get("cost_time_sec") or 0.0
-        # 若处于 processing 中且 cost_sec 为 0，计算实时耗时
         if d.get("status") == "processing" and cost_sec <= 0:
             cost_sec = float(d.get("live_elapsed_sec") or 0.0)
 
@@ -455,22 +465,16 @@ def get_history_feed() -> List[Dict[str, Any]]:
             
         group_title = d.get("watched_at") or "更早"
         if group_title not in groups_map:
-            groups_map[group_title] = {
+            group_obj = {
                 "date": group_title,
-                "score": parse_date_score(group_title),
                 "items": []
             }
+            groups_map[group_title] = group_obj
+            ordered_groups.append(group_obj)
             
         groups_map[group_title]["items"].append(d)
         
     conn.close()
-    
-    # 将分组按真实时间戳从大到小 (最新在前) 严格倒序排列
-    ordered_groups = sorted(groups_map.values(), key=lambda g: g["score"], reverse=True)
-    # 清理 score 临时字段
-    for g in ordered_groups:
-        del g["score"]
-        
     return ordered_groups
 
 def get_stats() -> Dict[str, Any]:

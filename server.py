@@ -29,6 +29,7 @@ class VideoMeta(BaseModel):
     duration_sec: int = 0
     thumbnail: Optional[str] = None
     watchedDate: str = ""
+    seq_order: int = 0
 
 class SyncRequest(BaseModel):
     items: List[VideoMeta]
