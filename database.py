@@ -15,7 +15,7 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
-    # 1. 核心条目表
+    # 1. 核心条目表 (Append-Only 流水日志，严格只添加不插值)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,8 +34,7 @@ def init_db():
         current_step TEXT,                      -- 当前步骤，如 '下载音频', 'Whisper识别'
         error_message TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(source, source_id)
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     """)
 
@@ -86,58 +85,30 @@ def init_db():
     conn.commit()
     conn.close()
 
-def compute_view_timestamp(watched_date_str: str, index_in_group: int = 0) -> int:
-    """
-    根据日期分组 (今天、昨天、星期X、X月X日) 与组内从上到下的位序，
-    生成全局单调时间戳 (秒级)，彻底解决每天采集时 1, 2, 3 序号重置与碰撞问题。
-    规则：目标公历日 23:59:59 - index_in_group 秒。
-    """
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    l = watched_date_str.strip() if watched_date_str else ''
-    
-    target_date = now.date()
-    if '今天' in l or 'Today' in l:
-        target_date = now.date()
-    elif '昨天' in l or 'Yesterday' in l:
-        target_date = now.date() - timedelta(days=1)
-    else:
-        m = re.search(r'(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日', l)
-        if m:
-            year = int(m.group(1)) if m.group(1) else now.year
-            month = int(m.group(2))
-            day = int(m.group(3))
-            try:
-                target_date = datetime(year, month, day).date()
-            except Exception:
-                target_date = now.date() - timedelta(days=30)
-        else:
-            weekdays = {'星期一': 0, '星期二': 1, '星期三': 2, '星期四': 3, '星期五': 4, '星期六': 5, '星期日': 6, '星期天': 6}
-            matched_w = False
-            for w_name, w_idx in weekdays.items():
-                if w_name in l:
-                    diff = (now.weekday() - w_idx) % 7
-                    if diff == 0:
-                        diff = 7
-                    target_date = now.date() - timedelta(days=diff)
-                    matched_w = True
-                    break
-            if not matched_w:
-                target_date = now.date() - timedelta(days=60)
-
-    base_dt = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59)
-    final_dt = base_dt - timedelta(seconds=index_in_group)
-    return int(final_dt.timestamp())
+def get_latest_cursor() -> Optional[Dict[str, Any]]:
+    """获取历史记录表中最后一条记录 (即当前最新的观看记录) 作为分界线游标"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT id, source, source_id, title, author, watched_at, created_at
+    FROM items
+    ORDER BY id DESC
+    LIMIT 1;
+    """)
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
-    """批量插入或更新视频，基于虚拟全局时间戳实现跨天增量采集永不碰撞与严格保序"""
+    """
+    增量追加历史记录 (Append-Only):
+    传入的 items_data 已按时间从旧到新 (较旧在前、最新在后) 排好序，
+    服务端严格纯添加追加到 items 表尾部，自增 id 纯单调递增。
+    如果该视频此前已生成过字幕，直接复用其字幕结果，避免重复 ASR 耗费 CPU。
+    """
     conn = get_connection()
     cursor = conn.cursor()
     inserted = 0
-    updated = 0
-    
-    # 统计每个日期分组内的相对位序 (从 0 开始自上而下递增)
-    group_indices = {}
     
     for item in items_data:
         source = item.get("source", "youtube")
@@ -151,34 +122,52 @@ def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
         thumbnail_url = item.get("thumbnail") or item.get("thumbnail_url") or f"https://i.ytimg.com/vi/{source_id}/hqdefault.jpg"
         watched_at = item.get("watchedDate") or item.get("watched_at", "")
         
-        # 计算组内 index
-        idx_in_group = group_indices.get(watched_at, 0)
-        group_indices[watched_at] = idx_in_group + 1
+        # 检查之前是否已经处理就绪过同源视频 (复用字幕)
+        cursor.execute("""
+        SELECT id, sub_source, cost_time_sec 
+        FROM items 
+        WHERE source = ? AND source_id = ? AND status = 'ready'
+        ORDER BY id DESC LIMIT 1;
+        """, (source, source_id))
+        prev_ready = cursor.fetchone()
         
-        # 计算全局唯一且单调的时间戳 (明天的必定大于今天的，今天的必定大于昨天的，组内自上而下严格递减)
-        view_ts = compute_view_timestamp(watched_at, idx_in_group)
+        initial_status = 'ready' if prev_ready else 'pending'
+        sub_source = prev_ready["sub_source"] if prev_ready else None
+        cost_time = prev_ready["cost_time_sec"] if prev_ready else 0.0
+        step_text = '已完成 (复用)' if prev_ready else None
+        progress = 100 if prev_ready else 0
+
+        # 如果已有相同记录且在表尾（如重试或游标对齐），避免微小重复
+        cursor.execute("SELECT id FROM items WHERE source = ? AND source_id = ? ORDER BY id DESC LIMIT 1;", (source, source_id))
+        last_same = cursor.fetchone()
+
+        cursor.execute("""
+        INSERT INTO items (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, status, sub_source, progress_pct, cost_time_sec, current_step)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, initial_status, sub_source, progress, cost_time, step_text))
         
-        try:
+        new_item_id = cursor.lastrowid
+        inserted += 1
+        
+        # 若之前有已完成的字幕，直接把字幕分段关联/复制一份到新 item_id
+        if prev_ready:
+            old_item_id = prev_ready["id"]
             cursor.execute("""
-            INSERT INTO items (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, seq_order, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-            ON CONFLICT(source, source_id) DO UPDATE SET
-                watched_at = excluded.watched_at,
-                seq_order = excluded.seq_order,
-                title = CASE WHEN items.title = '' THEN excluded.title ELSE items.title END,
-                author = CASE WHEN items.author = '' THEN excluded.author ELSE items.author END,
-                updated_at = CURRENT_TIMESTAMP;
-            """, (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, view_ts))
-            if cursor.rowcount > 0:
-                inserted += 1
-            else:
-                updated += 1
-        except Exception:
-            pass
+            INSERT INTO video_subtitles (item_id, start_sec, end_sec, text)
+            SELECT ?, start_sec, end_sec, text
+            FROM video_subtitles WHERE item_id = ?;
+            """, (new_item_id, old_item_id))
             
+            # 同时复制 FTS5 全文索引
+            cursor.execute("""
+            INSERT INTO subtitles_fts (item_id, title, author, content)
+            SELECT ?, title, author, content
+            FROM subtitles_fts WHERE item_id = ?;
+            """, (new_item_id, old_item_id))
+
     conn.commit()
     conn.close()
-    return {"inserted": inserted, "updated": updated}
+    return {"inserted": inserted, "updated": 0}
 
 def get_next_pending_item() -> Optional[Dict[str, Any]]:
     conn = get_connection()
@@ -479,23 +468,19 @@ def parse_date_score(label: str) -> float:
     return 0.0
 
 def get_history_feed() -> List[Dict[str, Any]]:
-    """获取按浏览次序严格对齐的历史记录流 (与浏览器文档流自上而下完全一致，时间戳倒序)"""
+    """历史记录页面倒序展示历史记录表中的记录 (严格按照纯追加日志 ORDER BY id DESC)"""
     conn = get_connection()
     cursor = conn.cursor()
-    # 按照虚拟全局时间戳 seq_order DESC 倒序排列 (最新时间在最前，0 或未设置的排在最后)
     cursor.execute("""
     SELECT id, source_id, title, author, url, duration_sec, thumbnail_url,
-           watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at, seq_order,
+           watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at,
            (strftime('%s', 'now') - strftime('%s', updated_at)) as live_elapsed_sec
     FROM items
-    ORDER BY 
-        CASE WHEN seq_order > 0 THEN 0 ELSE 1 END ASC,
-        seq_order DESC,
-        id DESC;
+    ORDER BY id DESC;
     """)
     rows = cursor.fetchall()
     
-    # 按从上往下遍历到的先后顺序自然组织日期分组与组内条目
+    # 按倒序遍历到的先后顺序自然组织日期分组与组内条目 (最新观看永远在最顶部)
     groups_map = {}
     ordered_groups = []
     

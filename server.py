@@ -119,11 +119,25 @@ async def index():
 async def health():
     return {"status": "ok", "service": "cyberstory"}
 
+@app.get("/api/sync/latest_cursor")
+async def latest_cursor():
+    """获取服务端历史流水中的最后一条记录 (最新观看) 作为分界线游标"""
+    cursor_item = database.get_latest_cursor()
+    if cursor_item:
+        return {
+            "has_cursor": True,
+            "cursor_id": cursor_item["source_id"],
+            "item_id": cursor_item["id"],
+            "title": cursor_item["title"],
+            "watched_at": cursor_item.get("watched_at", "")
+        }
+    return {"has_cursor": False, "cursor_id": None}
+
 @app.post("/api/sync/youtube")
 async def sync_youtube(req: SyncRequest):
     items_data = [item.model_dump() for item in req.items]
     result = database.insert_items(items_data)
-    logger.info(f"Sync received: inserted={result['inserted']}, ignored={result['ignored']}")
+    logger.info(f"Sync received: inserted={result['inserted']}")
     return {"success": True, **result}
 
 @app.get("/api/search")

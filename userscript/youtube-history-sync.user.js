@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         cyberstory - YouTube History Sync
 // @namespace    https://cyberstory.local
-// @version      1.2.0
-// @description  自动扫描 YouTube 历史记录 (含长视频与 Shorts) 并严格按浏览次序同步至本地 cyberstory 服务
+// @version      1.3.0
+// @description  自动扫描 YouTube 历史记录 (游标分界线增量截断，严格倒序单向追加至 cyberstory 服务)
 // @author       cyberstory
 // @match        https://www.youtube.com/feed/history*
 // @grant        GM_getValue
@@ -15,17 +15,16 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '1.2.0';
+    const SCRIPT_VERSION = '1.3.0';
     const API_BASE = 'http://127.0.0.1:8765';
     const SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟
     const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 小时无新视频则刷新
-    const MAX_SYNCED_IDS = 200;
 
     let syncing = false;
     let lastNewCount = 0;
     let lastNewTime = Date.now();
 
-    // ─── Capsule UI ───
+    // ─── 1. Capsule UI ───
     if (!document.getElementById('cyber-history-capsule')) {
         const capsule = document.createElement('div');
         capsule.id = 'cyber-history-capsule';
@@ -83,7 +82,7 @@
         document.getElementById('chSyncBtn').addEventListener('click', () => doSync());
     }
 
-    // ─── Health Check ───
+    // ─── 2. Health Check ───
     async function checkHealth() {
         const indicator = document.getElementById('chIndicator');
         const statusEl = document.getElementById('chStatus');
@@ -99,7 +98,20 @@
         return false;
     }
 
-    // ─── Helpers ───
+    // ─── 3. 获取服务端最后一条记录作为“分界线” ───
+    async function fetchLatestCursor() {
+        try {
+            const res = await fetch(`${API_BASE}/api/sync/latest_cursor`, { signal: AbortSignal.timeout(4000) });
+            if (res.ok) {
+                const data = await res.json();
+                return data.has_cursor ? data.cursor_id : null;
+            }
+        } catch (e) {
+            console.warn('Failed to fetch cursor, will fallback', e);
+        }
+        return null;
+    }
+
     function parseDuration(str) {
         if (!str) return 0;
         const parts = str.trim().split(':').map(Number);
@@ -108,21 +120,23 @@
         return 0;
     }
 
-    // ─── 核心 DOM 解析：严格按照自上而下文档流捕获长视频与 Shorts ───
-    function parseHistoryCards() {
+    // ─── 4. 从页面顶端扫描卡片，直到分界线截断 ───
+    function scanCardsUntilCursor(cursorId) {
         const sections = Array.from(document.querySelectorAll('ytd-item-section-renderer'));
-        const results = [];
+        const newCards = [];
         const seen = new Set();
-        let seq = 1;
+        let hitCursor = false;
 
-        sections.forEach(sec => {
+        for (const sec of sections) {
+            if (hitCursor) break;
+
             const headerEl = sec.querySelector('#header, #title, #header-text, h2');
             let dateLabel = headerEl ? headerEl.textContent.trim() : '';
             if (!dateLabel || dateLabel === 'Shorts') dateLabel = '未知日期';
 
             const cards = sec.querySelectorAll('yt-lockup-view-model, ytd-video-renderer, ytm-shorts-lockup-view-model, ytd-reel-item-renderer, yt-shorts-lockup-view-model');
 
-            cards.forEach(card => {
+            for (const card of cards) {
                 const watchLink = card.querySelector('a[href*="/watch?v="]');
                 const shortsLink = card.querySelector('a[href*="/shorts/"]');
 
@@ -138,7 +152,14 @@
                     if (m) { videoId = m[1]; isShort = true; link = shortsLink; }
                 }
 
-                if (!videoId || seen.has(videoId)) return;
+                if (!videoId || seen.has(videoId)) continue;
+
+                // 遇到分界线：说明以下都是已经同步过的历史记录，立即截断停止扫描！
+                if (cursorId && videoId === cursorId) {
+                    hitCursor = true;
+                    break;
+                }
+
                 seen.add(videoId);
 
                 let title = '';
@@ -176,8 +197,7 @@
                     }
                 }
 
-                results.push({
-                    seq_order: seq++,
+                newCards.push({
                     videoId,
                     title: title.slice(0, 150),
                     channel: channel || (isShort ? 'YouTube Shorts' : 'YouTube'),
@@ -187,13 +207,13 @@
                     watchedDate: dateLabel,
                     is_short: isShort
                 });
-            });
-        });
+            }
+        }
 
-        return results;
+        return newCards;
     }
 
-    // ─── Sync Logic ───
+    // ─── 5. 执行同步逻辑 (取游标 -> 扫描截断 -> 倒序提交追加) ───
     async function doSync() {
         if (syncing) return;
         syncing = true;
@@ -201,7 +221,7 @@
         const statusEl = document.getElementById('chStatus');
 
         if (syncBtn) syncBtn.disabled = true;
-        if (statusEl) statusEl.textContent = 'CyberHistory: 扫描中...';
+        if (statusEl) statusEl.textContent = 'CyberHistory: 获取游标分界线...';
 
         const online = await checkHealth();
         if (!online) {
@@ -211,27 +231,38 @@
         }
 
         try {
-            const allVideos = parseHistoryCards();
-            if (allVideos.length === 0) {
-                if (statusEl) statusEl.textContent = 'CyberHistory: 未找到视频卡片';
+            // 步骤 1: 从服务端获取分界线游标
+            const cursorId = await fetchLatestCursor();
+
+            // 步骤 2: 从页面顶部往下扫描，直到分界线截断
+            if (statusEl) statusEl.textContent = 'CyberHistory: 增量扫描中...';
+            const newCards = scanCardsUntilCursor(cursorId);
+
+            if (newCards.length === 0) {
+                const nextTime = new Date(Date.now() + SYNC_INTERVAL_MS).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+                if (statusEl) statusEl.textContent = `CyberHistory: 已是最新 (无新增) | 下次: ${nextTime}`;
                 syncing = false;
                 if (syncBtn) syncBtn.disabled = false;
                 return;
             }
 
-            // 上报全部已扫描条目 (支持更新既有记录的最新顺序与日期)
+            // 步骤 3: 按照倒序顺序 (即从旧到新按时间发生顺序) 提交追加到数据库表
+            const toAppend = newCards.reverse();
+
+            if (statusEl) statusEl.textContent = `CyberHistory: 追加 ${toAppend.length} 条中...`;
+
             const resp = await fetch(`${API_BASE}/api/sync/youtube`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ items: allVideos })
+                body: JSON.stringify({ items: toAppend })
             });
             const result = await resp.json();
 
-            lastNewCount = result.inserted !== undefined ? result.inserted : allVideos.length;
+            lastNewCount = result.inserted !== undefined ? result.inserted : toAppend.length;
             lastNewTime = Date.now();
 
             const nextTime = new Date(Date.now() + SYNC_INTERVAL_MS).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-            if (statusEl) statusEl.textContent = `CyberHistory: 已同步 ${allVideos.length} 条 (新增${result.inserted || 0}) | 下次: ${nextTime}`;
+            if (statusEl) statusEl.textContent = `CyberHistory: 已增量追加 ${lastNewCount} 条 | 下次: ${nextTime}`;
         } catch (err) {
             if (statusEl) statusEl.textContent = `CyberHistory: 同步失败 (${err.message})`;
         }
@@ -241,8 +272,9 @@
     }
 
     window.__cyberHistorySync = doSync;
+    window.__scanCardsUntilCursor = scanCardsUntilCursor;
 
-    // ─── Scheduling ───
+    // ─── 定时调度 ───
     setTimeout(() => doSync(), 1500);
     setInterval(() => doSync(), SYNC_INTERVAL_MS);
 
