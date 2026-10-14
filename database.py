@@ -86,12 +86,58 @@ def init_db():
     conn.commit()
     conn.close()
 
+def compute_view_timestamp(watched_date_str: str, index_in_group: int = 0) -> int:
+    """
+    根据日期分组 (今天、昨天、星期X、X月X日) 与组内从上到下的位序，
+    生成全局单调时间戳 (秒级)，彻底解决每天采集时 1, 2, 3 序号重置与碰撞问题。
+    规则：目标公历日 23:59:59 - index_in_group 秒。
+    """
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    l = watched_date_str.strip() if watched_date_str else ''
+    
+    target_date = now.date()
+    if '今天' in l or 'Today' in l:
+        target_date = now.date()
+    elif '昨天' in l or 'Yesterday' in l:
+        target_date = now.date() - timedelta(days=1)
+    else:
+        m = re.search(r'(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日', l)
+        if m:
+            year = int(m.group(1)) if m.group(1) else now.year
+            month = int(m.group(2))
+            day = int(m.group(3))
+            try:
+                target_date = datetime(year, month, day).date()
+            except Exception:
+                target_date = now.date() - timedelta(days=30)
+        else:
+            weekdays = {'星期一': 0, '星期二': 1, '星期三': 2, '星期四': 3, '星期五': 4, '星期六': 5, '星期日': 6, '星期天': 6}
+            matched_w = False
+            for w_name, w_idx in weekdays.items():
+                if w_name in l:
+                    diff = (now.weekday() - w_idx) % 7
+                    if diff == 0:
+                        diff = 7
+                    target_date = now.date() - timedelta(days=diff)
+                    matched_w = True
+                    break
+            if not matched_w:
+                target_date = now.date() - timedelta(days=60)
+
+    base_dt = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59)
+    final_dt = base_dt - timedelta(seconds=index_in_group)
+    return int(final_dt.timestamp())
+
 def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
-    """批量插入新视频，若已存在则更新其 watched_at 与 seq_order 保证最新浏览次序"""
+    """批量插入或更新视频，基于虚拟全局时间戳实现跨天增量采集永不碰撞与严格保序"""
     conn = get_connection()
     cursor = conn.cursor()
     inserted = 0
     updated = 0
+    
+    # 统计每个日期分组内的相对位序 (从 0 开始自上而下递增)
+    group_indices = {}
     
     for item in items_data:
         source = item.get("source", "youtube")
@@ -104,7 +150,13 @@ def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
         duration_sec = int(item.get("duration_sec", 0))
         thumbnail_url = item.get("thumbnail") or item.get("thumbnail_url") or f"https://i.ytimg.com/vi/{source_id}/hqdefault.jpg"
         watched_at = item.get("watchedDate") or item.get("watched_at", "")
-        seq_order = int(item.get("seq_order", 0))
+        
+        # 计算组内 index
+        idx_in_group = group_indices.get(watched_at, 0)
+        group_indices[watched_at] = idx_in_group + 1
+        
+        # 计算全局唯一且单调的时间戳 (明天的必定大于今天的，今天的必定大于昨天的，组内自上而下严格递减)
+        view_ts = compute_view_timestamp(watched_at, idx_in_group)
         
         try:
             cursor.execute("""
@@ -116,7 +168,7 @@ def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
                 title = CASE WHEN items.title = '' THEN excluded.title ELSE items.title END,
                 author = CASE WHEN items.author = '' THEN excluded.author ELSE items.author END,
                 updated_at = CURRENT_TIMESTAMP;
-            """, (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, seq_order))
+            """, (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, view_ts))
             if cursor.rowcount > 0:
                 inserted += 1
             else:
@@ -427,10 +479,10 @@ def parse_date_score(label: str) -> float:
     return 0.0
 
 def get_history_feed() -> List[Dict[str, Any]]:
-    """获取按浏览次序严格对齐的历史记录流 (与浏览器文档流自上而下完全一致)"""
+    """获取按浏览次序严格对齐的历史记录流 (与浏览器文档流自上而下完全一致，时间戳倒序)"""
     conn = get_connection()
     cursor = conn.cursor()
-    # 严格按照从上往下的 seq_order ASC 排列 (0 或未设置的排在最后)
+    # 按照虚拟全局时间戳 seq_order DESC 倒序排列 (最新时间在最前，0 或未设置的排在最后)
     cursor.execute("""
     SELECT id, source_id, title, author, url, duration_sec, thumbnail_url,
            watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at, seq_order,
@@ -438,7 +490,7 @@ def get_history_feed() -> List[Dict[str, Any]]:
     FROM items
     ORDER BY 
         CASE WHEN seq_order > 0 THEN 0 ELSE 1 END ASC,
-        seq_order ASC,
+        seq_order DESC,
         id DESC;
     """)
     rows = cursor.fetchall()
