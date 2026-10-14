@@ -133,11 +133,19 @@ async def latest_cursor():
         }
     return {"has_cursor": False, "cursor_id": None}
 
+@app.get("/api/sync/cursors")
+async def dual_cursors():
+    """获取双游标分界线：head_cursor (最老，用于回溯插入) 与 tail_cursor (最新，用于常规追加)"""
+    return database.get_dual_cursors()
+
 @app.post("/api/sync/youtube")
-async def sync_youtube(req: SyncRequest):
+async def sync_youtube(
+    req: SyncRequest,
+    direction: str = Query("tail_append", description="tail_append (向未来追加) 或 head_prepend (向过去回溯插入)")
+):
     items_data = [item.model_dump() for item in req.items]
-    result = database.insert_items(items_data)
-    logger.info(f"Sync received: inserted={result['inserted']}")
+    result = database.insert_items(items_data, direction=direction)
+    logger.info(f"Sync received ({direction}): inserted={result['inserted']}")
     return {"success": True, **result}
 
 @app.get("/api/search")

@@ -85,32 +85,71 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_latest_cursor() -> Optional[Dict[str, Any]]:
-    """获取历史记录表中最后一条记录 (即当前最新的观看记录) 作为分界线游标"""
+def get_dual_cursors() -> Dict[str, Any]:
+    """获取当前历史记录表的最老游标 (head_cursor，用于向过去回溯) 与最新游标 (tail_cursor，用于常规向未来追加)"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-    SELECT id, source, source_id, title, author, watched_at, created_at
-    FROM items
-    ORDER BY id DESC
-    LIMIT 1;
-    """)
-    row = cursor.fetchone()
+    cursor.execute("SELECT min(id), max(id), count(*) FROM items;")
+    min_id, max_id, count = cursor.fetchone()
+    
+    if not count:
+        conn.close()
+        return {"has_cursor": False, "head_cursor": None, "tail_cursor": None, "total_items": 0}
+        
+    cursor.execute("SELECT id, source_id, title, watched_at, created_at FROM items WHERE id = ?;", (min_id,))
+    head_row = dict(cursor.fetchone())
+    
+    cursor.execute("SELECT id, source_id, title, watched_at, created_at FROM items WHERE id = ?;", (max_id,))
+    tail_row = dict(cursor.fetchone())
+    
     conn.close()
-    return dict(row) if row else None
+    return {
+        "has_cursor": True,
+        "head_cursor": head_row, # 最老的一条 (向过去回溯半年前/一年前时的分界线)
+        "tail_cursor": tail_row, # 最新的一条 (常规同步明天/后天时的分界线)
+        "total_items": count
+    }
 
-def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
+def get_latest_cursor() -> Optional[Dict[str, Any]]:
+    """向后兼容：获取历史记录表中最后一条记录 (即 tail_cursor 最新观看记录) 作为常规追加分界线"""
+    cursors = get_dual_cursors()
+    return cursors.get("tail_cursor")
+
+def insert_items(items_data: List[Dict[str, Any]], direction: str = "tail_append") -> Dict[str, int]:
     """
-    增量追加历史记录 (Append-Only):
-    传入的 items_data 已按时间从旧到新 (较旧在前、最新在后) 排好序，
-    服务端严格纯添加追加到 items 表尾部，自增 id 纯单调递增。
-    如果该视频此前已生成过字幕，直接复用其字幕结果，避免重复 ASR 耗费 CPU。
+    双向增量日志写入 (Append-Only / Prepend-Only):
+    - direction == "tail_append": 常规同步，向未来产生的新视频在表尾追加 (分配 id > max_id)
+    - direction == "head_prepend": 深度同步，向过去回溯半年/一年前的历史视频在表头插入 (分配 id < min_id)
+    初始基准 ID 从 1,000,000 起始，向过去预留 100 万个历史坑位，向未来无限递增。
+    如果视频此前已转写过字幕，自动复用已有字幕，不重复耗费 CPU。
     """
+    if not items_data:
+        return {"inserted": 0, "updated": 0}
+        
     conn = get_connection()
     cursor = conn.cursor()
     inserted = 0
     
-    for item in items_data:
+    cursor.execute("SELECT min(id), max(id), count(*) FROM items;")
+    curr_min_id, curr_max_id, count = cursor.fetchone()
+    
+    if not count:
+        curr_min_id = 1000000
+        curr_max_id = 1000000
+        
+    if direction == "head_prepend":
+        # 头部回溯插入：items_data 在页面上自上而下 (较近过去 -> 更深过去)
+        # 按时间发生顺序，更深过去的应先获得较小的 id，较近过去的获得贴近 min_id 的 id
+        # 例如 K 条数据：最老分配 (min_id - K)，次老分配 (min_id - K + 1)...
+        total_k = len(items_data)
+        ordered_items = list(reversed(items_data)) # 反转为从更深过去到较近过去
+        next_id_start = (curr_min_id - total_k)
+    else:
+        # 尾部常规追加：items_data 传入时已反转为正序 (较旧在前、最新在后)
+        ordered_items = items_data
+        next_id_start = curr_max_id + 1
+
+    for idx, item in enumerate(ordered_items):
         source = item.get("source", "youtube")
         source_id = item.get("videoId") or item.get("source_id")
         if not source_id:
@@ -121,6 +160,8 @@ def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
         duration_sec = int(item.get("duration_sec", 0))
         thumbnail_url = item.get("thumbnail") or item.get("thumbnail_url") or f"https://i.ytimg.com/vi/{source_id}/hqdefault.jpg"
         watched_at = item.get("watchedDate") or item.get("watched_at", "")
+        
+        assigned_id = next_id_start + idx
         
         # 检查之前是否已经处理就绪过同源视频 (复用字幕)
         cursor.execute("""
@@ -137,33 +178,33 @@ def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
         step_text = '已完成 (复用)' if prev_ready else None
         progress = 100 if prev_ready else 0
 
-        # 如果已有相同记录且在表尾（如重试或游标对齐），避免微小重复
-        cursor.execute("SELECT id FROM items WHERE source = ? AND source_id = ? ORDER BY id DESC LIMIT 1;", (source, source_id))
-        last_same = cursor.fetchone()
-
         cursor.execute("""
-        INSERT INTO items (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, status, sub_source, progress_pct, cost_time_sec, current_step)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """, (source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, initial_status, sub_source, progress, cost_time, step_text))
+        INSERT INTO items (id, source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, status, sub_source, progress_pct, cost_time_sec, current_step)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """, (assigned_id, source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, initial_status, sub_source, progress, cost_time, step_text))
         
-        new_item_id = cursor.lastrowid
         inserted += 1
         
-        # 若之前有已完成的字幕，直接把字幕分段关联/复制一份到新 item_id
+        # 若之前有已完成的字幕，直接把字幕分段关联/复制一份到新 assigned_id
         if prev_ready:
             old_item_id = prev_ready["id"]
             cursor.execute("""
             INSERT INTO video_subtitles (item_id, start_sec, end_sec, text)
             SELECT ?, start_sec, end_sec, text
             FROM video_subtitles WHERE item_id = ?;
-            """, (new_item_id, old_item_id))
+            """, (assigned_id, old_item_id))
             
-            # 同时复制 FTS5 全文索引
             cursor.execute("""
             INSERT INTO subtitles_fts (item_id, title, author, content)
             SELECT ?, title, author, content
             FROM subtitles_fts WHERE item_id = ?;
-            """, (new_item_id, old_item_id))
+            """, (assigned_id, old_item_id))
+
+    # 更新 sqlite 自增游标
+    cursor.execute("SELECT max(id) FROM items;")
+    new_max = cursor.fetchone()[0]
+    cursor.execute("DELETE FROM sqlite_sequence WHERE name='items';")
+    cursor.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('items', ?);", (new_max,))
 
     conn.commit()
     conn.close()
