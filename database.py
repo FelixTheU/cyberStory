@@ -384,8 +384,44 @@ def get_item_subtitles(item_id: int) -> List[Dict[str, Any]]:
     conn.close()
     return segments
 
+def parse_date_score(label: str) -> float:
+    """将人类可读日期 (如 '今天', '昨天', '10月6日', '星期一') 解析为时间戳权重，保证最新日期排在最前"""
+    if not label:
+        return 0.0
+    l = label.strip()
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    
+    if '今天' in l or 'Today' in l:
+        return now.timestamp()
+    if '昨天' in l or 'Yesterday' in l:
+        return (now - timedelta(days=1)).timestamp()
+    
+    # 匹配 "10月13日"、"9月11日"、"2026年10月13日"
+    m = re.search(r'(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日', l)
+    if m:
+        year = int(m.group(1)) if m.group(1) else now.year
+        month = int(m.group(2))
+        day = int(m.group(3))
+        try:
+            return datetime(year, month, day).timestamp()
+        except Exception:
+            return 0.0
+            
+    # 匹配 "星期X" (本周内的相对星期)
+    weekdays = {'星期一': 0, '星期二': 1, '星期三': 2, '星期四': 3, '星期五': 4, '星期六': 5, '星期日': 6, '星期天': 6}
+    for w_name, w_idx in weekdays.items():
+        if w_name in l:
+            diff = (now.weekday() - w_idx) % 7
+            if diff == 0:
+                diff = 7
+            target_date = now - timedelta(days=diff)
+            return target_date.timestamp()
+            
+    return 0.0
+
 def get_history_feed() -> List[Dict[str, Any]]:
-    """获取按日期分组的历史记录流，包含状态、进度、耗时信息"""
+    """获取按日期分组的历史记录流 (最新日期在最前，组内按观看/入库倒序)"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -393,13 +429,12 @@ def get_history_feed() -> List[Dict[str, Any]]:
            watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at,
            (strftime('%s', 'now') - strftime('%s', updated_at)) as live_elapsed_sec
     FROM items
-    ORDER BY id ASC;
+    ORDER BY id DESC;
     """)
     rows = cursor.fetchall()
     
     # 格式化数据并按 watched_at (日期标签如 '今天', '昨天', '9月11日' 等) 分组
     groups_map = {}
-    ordered_groups = []
     
     for r in rows:
         d = dict(r)
@@ -418,18 +453,24 @@ def get_history_feed() -> List[Dict[str, Any]]:
         else:
             d["cost_time_str"] = f"{int(cost_sec)}s"
             
-        group_title = d.get("watched_at") or "未知日期"
+        group_title = d.get("watched_at") or "更早"
         if group_title not in groups_map:
-            group_obj = {
+            groups_map[group_title] = {
                 "date": group_title,
+                "score": parse_date_score(group_title),
                 "items": []
             }
-            groups_map[group_title] = group_obj
-            ordered_groups.append(group_obj)
             
         groups_map[group_title]["items"].append(d)
         
     conn.close()
+    
+    # 将分组按真实时间戳从大到小 (最新在前) 严格倒序排列
+    ordered_groups = sorted(groups_map.values(), key=lambda g: g["score"], reverse=True)
+    # 清理 score 临时字段
+    for g in ordered_groups:
+        del g["score"]
+        
     return ordered_groups
 
 def get_stats() -> Dict[str, Any]:
