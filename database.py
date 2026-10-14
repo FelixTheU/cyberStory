@@ -125,11 +125,14 @@ def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
 def get_next_pending_item() -> Optional[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()
+    # 采用短作业优先 (SJF) 调度策略：短视频优先处理，避免超长视频阻塞队列
     cursor.execute("""
     SELECT id, source, source_id, title, author, url, duration_sec
     FROM items
     WHERE status = 'pending'
-    ORDER BY id ASC
+    ORDER BY 
+        CASE WHEN duration_sec <= 0 THEN 999999 ELSE duration_sec END ASC,
+        id ASC
     LIMIT 1;
     """)
     row = cursor.fetchone()

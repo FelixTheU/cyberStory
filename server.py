@@ -91,6 +91,15 @@ async def add_private_network_headers(request, call_next):
     response.headers["Access-Control-Allow-Private-Network"] = "true"
     return response
 
+# userscript 文件直链 (方便油猴一键安装与更新)
+userscript_file = Path(__file__).resolve().parent / "userscript" / "youtube-history-sync.user.js"
+
+@app.get("/userscript/youtube-history-sync.user.js")
+async def get_userscript():
+    if userscript_file.exists():
+        return FileResponse(str(userscript_file), media_type="text/javascript")
+    raise HTTPException(status_code=404, detail="Userscript not found")
+
 # 静态文件
 static_dir = Path(__file__).resolve().parent / "static"
 static_dir.mkdir(exist_ok=True)

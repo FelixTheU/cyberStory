@@ -178,7 +178,14 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
             database.update_item_status(item_id, status="processing", current_step="Whisper模型加载", progress_pct=40, cost_time_sec=elapsed)
 
         from faster_whisper import WhisperModel
-        model = WhisperModel(config.WHISPER_MODEL, device=config.WHISPER_DEVICE, compute_type=config.WHISPER_COMPUTE_TYPE)
+        # 显式限制 CPU 核心数与 worker 数，防止跑满宿主机 CPU
+        model = WhisperModel(
+            config.WHISPER_MODEL,
+            device=config.WHISPER_DEVICE,
+            compute_type=config.WHISPER_COMPUTE_TYPE,
+            cpu_threads=getattr(config, "WHISPER_CPU_THREADS", 2),
+            num_workers=1
+        )
 
         if item_id:
             elapsed = time.time() - t0 if t0 else 0
