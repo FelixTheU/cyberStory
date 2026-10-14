@@ -1,10 +1,11 @@
 /**
  * cyberstory 前端交互逻辑
  * 模块结构：
- * 1. 视图 Tab 切换与移动端响应式交互
+ * 1. 视图 Tab 切换 (搜索, YouTube, 知乎, 任务管理) 与移动端抽屉
  * 2. 全局搜索 (支持数据源切换、关键词检索、上下文台词联动)
- * 3. YouTube 历史流水 (日期分组、进度耗时透明、点击展开字幕)
- * 4. 时间轴字幕渲染、直达播放与二次过滤
+ * 3. YouTube 历史流水 (日期分组与折叠展开、Shorts识别、展开字幕)
+ * 4. 任务管理 (总览统计、进行中进度条、排队队列实时流、完成自动移除)
+ * 5. 台词时间轴渲染、直达播放与二次过滤
  */
 
 const API_BASE = '';
@@ -21,7 +22,10 @@ document.addEventListener('DOMContentLoaded', () => {
     initSearchEvents();
     initFilterEvents();
     loadYtHistory();
-    // 10秒定时同步状态与耗时
+    loadTasks();
+
+    // 定时轮询：任务管理每 3 秒刷新，历史流水每 10 秒刷新
+    setInterval(loadTasks, 3000);
     setInterval(loadYtHistory, 10000);
 });
 
@@ -50,7 +54,7 @@ async function initServiceStatus() {
 // ─── 2. 视图 Tab 切换 ───
 function switchMainTab(tabId) {
     currentTab = tabId;
-    const tabs = ['search', 'youtube', 'zhihu'];
+    const tabs = ['search', 'youtube', 'zhihu', 'tasks'];
 
     // 桌面侧边栏
     tabs.forEach(t => {
@@ -73,6 +77,10 @@ function switchMainTab(tabId) {
     // 关闭任何移动端抽屉
     closeMobileDetail('searchDetailPane');
     closeMobileDetail('ytDetailPane');
+
+    if (tabId === 'tasks') {
+        loadTasks();
+    }
 }
 
 function openMobileDetail(paneId) {
@@ -151,7 +159,7 @@ function renderSearchResults(items, keyword) {
         const sourceName = item.source === 'zhihu' ? '知乎' : 'YouTube';
 
         html += `
-            <div class="result-card ${isFirst ? 'active' : ''}" id="search-card-${item.id}" onclick="selectSearchResultItem(${item.id}, ${item.start_sec || 0}, '${escapeHtml(keyword)}')">
+            <div class="result-card ${isFirst ? 'active' : ''}" id="search-card-${item.ts_id || item.id}" onclick="selectSearchResultItem(${item.ts_id || item.id}, ${item.start_sec || 0}, '${escapeHtml(keyword)}')">
                 <div class="result-top">
                     <div class="result-thumb">
                         <img src="${escapeHtml(item.thumbnail_url)}" alt="thumb" loading="lazy" onerror="this.src='https://placehold.co/120x68?text=Video'">
@@ -184,17 +192,15 @@ function renderSearchResults(items, keyword) {
 
     container.innerHTML = html;
 
-    // 默认高亮并展开优先选中有字幕的卡片
     let defaultItem = items.find(i => i.sub_source === 'native' || i.sub_source === 'asr') || items[0];
     if (defaultItem) {
-        selectSearchResultItem(defaultItem.id, defaultItem.start_sec || 0, keyword, false);
+        selectSearchResultItem(defaultItem.ts_id || defaultItem.id, defaultItem.start_sec || 0, keyword, false);
     }
 }
 
 async function selectSearchResultItem(itemId, startSec, keyword, openMobile = true) {
     searchActiveItemId = itemId;
 
-    // 更新卡片激活态
     document.querySelectorAll('#searchResults .result-card').forEach(el => el.classList.remove('active'));
     const card = document.getElementById(`search-card-${itemId}`);
     if (card) {
@@ -229,7 +235,7 @@ async function selectSearchResultItem(itemId, startSec, keyword, openMobile = tr
     }
 }
 
-// ─── 4. YouTube 历史记录模块 (无搜索区，双栏展示) ───
+// ─── 4. YouTube 历史流水模块 (支持日期折叠) ───
 async function loadYtHistory() {
     try {
         const res = await fetch(`${API_BASE}/api/history`);
@@ -256,25 +262,37 @@ function renderYtFeed(groups) {
         return;
     }
 
+    // 保存当前各分区的折叠状态
+    const collapsedMap = {};
+    feed.querySelectorAll('.date-group.collapsed').forEach(el => {
+        const d = el.getAttribute('data-date');
+        if (d) collapsedMap[d] = true;
+    });
+
     let html = '';
     let firstReadyItem = null;
 
-    groups.forEach(group => {
+    groups.forEach((group, gIdx) => {
+        const isCollapsed = collapsedMap[group.date] ? 'collapsed' : '';
         html += `
-            <div class="date-group">
-                <div class="date-title">
-                    ${escapeHtml(group.date)}
-                    <span>${group.items.length} 个视频</span>
+            <div class="date-group ${isCollapsed}" data-date="${escapeHtml(group.date)}">
+                <div class="date-title" onclick="toggleDateGroup(this)">
+                    <div class="date-title-left">
+                        <span class="date-collapse-icon">▼</span>
+                        <span>${escapeHtml(group.date)}</span>
+                    </div>
+                    <span class="date-group-count">${group.items.length} 个视频</span>
                 </div>
+                <div class="date-group-content">
         `;
 
         group.items.forEach(item => {
-            const isActive = ytActiveItemId === item.id ? 'active' : '';
+            const itemId = item.ts_id || item.id;
+            const isActive = ytActiveItemId === itemId ? 'active' : '';
             if (!firstReadyItem && item.status === 'ready') firstReadyItem = item;
             const isShort = (item.url && item.url.includes('/shorts/')) || (item.author === 'YouTube Shorts');
             const durationLabel = isShort ? 'Shorts' : escapeHtml(item.duration_str);
 
-            // 状态徽标与步骤耗时
             let badgeHtml = '';
             let progressHtml = '';
 
@@ -294,7 +312,7 @@ function renderYtFeed(groups) {
                     badgeHtml += `<span style="font-size:10px; color:#94a3b8;">耗时 ${escapeHtml(item.cost_time_str)}</span>`;
                 }
             } else if (item.status === 'processing') {
-                const stepText = item.current_step || '排队准备中';
+                const stepText = item.current_step || '处理准备中';
                 const pct = (typeof item.progress_pct === 'number' && item.progress_pct > 0) ? item.progress_pct : 5;
                 const elapsedStr = item.cost_time_str ? `已耗时 ${item.cost_time_str}` : '刚刚开始';
                 badgeHtml += `<span class="badge-tag tag-processing">⚡ ${escapeHtml(stepText)}</span>`;
@@ -316,7 +334,7 @@ function renderYtFeed(groups) {
             }
 
             html += `
-                <div class="history-card ${isActive}" id="yt-card-${item.id}" onclick="selectYtHistoryItem(${item.id})">
+                <div class="history-card ${isActive}" id="yt-card-${itemId}" onclick="selectYtHistoryItem(${itemId})">
                     <div class="result-thumb">
                         <img src="${escapeHtml(item.thumbnail_url)}" alt="thumb" loading="lazy" onerror="this.src='https://placehold.co/120x68?text=Video'">
                         <span class="result-duration" style="${isShort ? 'background:#be185d;' : ''}">${durationLabel}</span>
@@ -335,14 +353,20 @@ function renderYtFeed(groups) {
             `;
         });
 
-        html += `</div>`;
+        html += `</div></div>`;
     });
 
     feed.innerHTML = html;
 
-    // 初次加载若无选中项，默认选中第一条
     if (!ytActiveItemId && firstReadyItem) {
-        selectYtHistoryItem(firstReadyItem.id, false);
+        selectYtHistoryItem(firstReadyItem.ts_id || firstReadyItem.id, false);
+    }
+}
+
+function toggleDateGroup(titleEl) {
+    const group = titleEl.closest('.date-group');
+    if (group) {
+        group.classList.toggle('collapsed');
     }
 }
 
@@ -382,7 +406,107 @@ async function selectYtHistoryItem(itemId, openMobile = true) {
     }
 }
 
-// ─── 5. 台词时间轴渲染与局部二次过滤 ───
+// ─── 5. 任务管理模块 (Task Management) ───
+async function loadTasks() {
+    try {
+        const res = await fetch(`${API_BASE}/api/tasks`);
+        if (!res.ok) return;
+        const data = await res.json();
+
+        // 1. 更新顶部总览指标
+        const sum = data.summary || {};
+        document.getElementById('statTotalVideos').textContent = sum.total_videos || 0;
+        document.getElementById('statProcessing').textContent = sum.processing || 0;
+        document.getElementById('statPending').textContent = sum.pending || 0;
+        document.getElementById('statReadyCoverage').textContent = `${sum.sub_coverage_pct || 0}%`;
+        document.getElementById('statReadySubCount').textContent = `已就绪 ${sum.ready || 0} 部 (共 ${sum.total_segments || 0} 句)`;
+
+        // 2. 更新侧边栏/底部 Tab 角标
+        const activeCount = (sum.processing || 0) + (sum.pending || 0);
+        const tasksBadge = document.getElementById('navTasksBadge');
+        if (tasksBadge) {
+            tasksBadge.textContent = activeCount;
+            tasksBadge.classList.toggle('pulse', (sum.processing || 0) > 0);
+        }
+
+        // 3. 如果当前处于任务管理界面，渲染任务流
+        if (currentTab === 'tasks') {
+            renderTaskList(data.tasks || []);
+        }
+    } catch (e) {
+        console.error('Failed to load tasks', e);
+    }
+}
+
+function renderTaskList(tasks) {
+    const feed = document.getElementById('taskListFeed');
+    if (!tasks || tasks.length === 0) {
+        feed.innerHTML = `
+            <div class="empty-hint" style="padding: 80px 20px;">
+                <div style="font-size: 36px; margin-bottom: 12px;">🎉</div>
+                <h3 style="font-size: 15px; color: #0f172a; margin-bottom: 6px;">任务队列空闲</h3>
+                <p style="color: #64748b; font-size: 13px;">当前没有正在处理或排队中的视频，所有历史记录已完成字幕提取与全文索引。</p>
+            </div>
+        `;
+        return;
+    }
+
+    let html = '';
+    tasks.forEach(task => {
+        const isProcessing = task.status === 'processing';
+        const isShort = (task.url && task.url.includes('/shorts/')) || (task.author === 'YouTube Shorts');
+        const durationLabel = isShort ? 'Shorts' : escapeHtml(task.duration_str);
+
+        const statusTag = isProcessing
+            ? `<span class="badge-tag tag-processing" style="background:#fef3c7; color:#b45309; font-weight:700;">⚡ 转写进行中</span>`
+            : `<span class="badge-tag tag-pending">⏳ 排队等待中</span>`;
+
+        const stepText = task.current_step || (isProcessing ? '处理准备中' : '排队中');
+        const pct = (typeof task.progress_pct === 'number' && task.progress_pct > 0) ? task.progress_pct : (isProcessing ? 10 : 0);
+        const costTime = task.cost_time_str ? `已耗时 ${task.cost_time_str}` : '刚刚加入';
+
+        let progressBarHtml = '';
+        if (isProcessing) {
+            progressBarHtml = `
+                <div class="progress-block" style="margin-top: 8px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span><b>当前步骤:</b> ${escapeHtml(stepText)}</span>
+                        <span><b>${pct}%</b> <span style="font-size:10px; color:#92400e;">(${escapeHtml(costTime)})</span></span>
+                    </div>
+                    <div class="progress-bar-bg" style="height:6px; background:#fde68a;">
+                        <div class="progress-bar-val" style="width: ${pct}%; background:#d97706;"></div>
+                    </div>
+                </div>
+            `;
+        }
+
+        html += `
+            <div class="history-card" style="${isProcessing ? 'border-color:#f59e0b; background:#fffdfa;' : ''}">
+                <div class="result-thumb">
+                    <img src="${escapeHtml(task.thumbnail_url)}" alt="thumb" loading="lazy" onerror="this.src='https://placehold.co/120x68?text=Video'">
+                    <span class="result-duration" style="${isShort ? 'background:#be185d;' : ''}">${durationLabel}</span>
+                </div>
+                <div class="result-info">
+                    <div class="result-title" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</div>
+                    <div class="result-meta">
+                        <span>${escapeHtml(task.author || 'YouTube')}</span>
+                        <span>•</span>
+                        <span>观看于 ${escapeHtml(task.watched_at || '')}</span>
+                    </div>
+                    <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
+                        ${statusTag}
+                        <span style="font-size:11px; color:#64748b;">${escapeHtml(costTime)}</span>
+                    </div>
+                    ${progressBarHtml}
+                </div>
+            </div>
+        `;
+    });
+
+    feed.innerHTML = html;
+}
+
+// ─── 6. 台词时间轴渲染与局部二次过滤 ───
 function renderTimelineRows(segments, containerId, highlightSec = null, keyword = '') {
     const container = document.getElementById(containerId);
     if (!segments || segments.length === 0) {
@@ -390,7 +514,6 @@ function renderTimelineRows(segments, containerId, highlightSec = null, keyword 
         return;
     }
 
-    // 针对大体量长视频进行视口分段渲染优化（避免卡死浏览器）
     let renderList = segments;
     if (segments.length > 250) {
         let centerIdx = 0;
@@ -432,7 +555,6 @@ function renderTimelineRows(segments, containerId, highlightSec = null, keyword 
     }
 }
 
-// 二次过滤输入框
 function initFilterEvents() {
     const searchFilter = document.getElementById('searchSubFilter');
     if (searchFilter) {
@@ -461,7 +583,6 @@ function filterTimelineRows(containerId, query) {
     });
 }
 
-// ─── 工具函数 ───
 function escapeHtml(str) {
     if (!str) return '';
     return String(str)

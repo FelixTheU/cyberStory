@@ -72,7 +72,7 @@
             display: flex;
             align-items: center;
             gap: 10px;
-            padding: 10px 14px;
+            padding: 10px 12px;
             border-radius: 8px;
             font-size: 13px;
             font-weight: 600;
@@ -83,6 +83,12 @@
         }
         .nav-tab:hover { background: #f1f5f9; color: #0f172a; }
         .nav-tab.active { background: var(--primary-light); color: var(--primary); }
+        .nav-tab .nav-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
         .nav-tab .badge {
             margin-left: auto;
             background: #f1f5f9;
@@ -93,6 +99,11 @@
             font-weight: 500;
         }
         .nav-tab.active .badge { background: var(--primary-border); color: #1d4ed8; }
+        .badge.pulse {
+            background: #fef3c7;
+            color: #b45309;
+            font-weight: 700;
+        }
 
         .service-status {
             padding: 14px 16px;
@@ -136,7 +147,7 @@
             cursor: pointer;
         }
         .bottom-nav-item.active { color: var(--primary); }
-        .bottom-nav-item .icon { font-size: 18px; }
+        .bottom-nav-item .icon { font-size: 18px; display: inline-flex; }
 
         /* ─── 3. 主工作区总容器 ─── */
         .workspace {
@@ -155,9 +166,9 @@
             display: flex;
         }
 
-        /* ─── 双栏结构：列表区宽 (flex:1) 与 详情区收窄 (width: var(--detail-width)) ─── */
+        /* ─── 双栏结构：列表区宽 (flex: 1) 与 详情区收窄 (width: var(--detail-width)) ─── */
         .master-pane {
-            flex: 1; /* 主列表区域占据主导宽度，充裕舒展 */
+            flex: 1;
             background: #ffffff;
             border-right: 1px solid var(--border-color);
             display: flex;
@@ -165,7 +176,7 @@
             min-width: 0;
         }
         .detail-pane {
-            width: var(--detail-width); /* 右侧收窄详情栏，专用于紧凑时间轴对照 */
+            width: var(--detail-width);
             background: #f8fafc;
             display: flex;
             flex-direction: column;
@@ -224,11 +235,12 @@
             position: absolute;
             left: 12px;
             color: #94a3b8;
-            font-size: 14px;
+            display: flex;
+            align-items: center;
         }
         .search-input {
             width: 100%;
-            padding: 9px 12px 9px 34px;
+            padding: 9px 12px 9px 36px;
             font-size: 14px;
             border: 1px solid #cbd5e1;
             border-radius: 8px;
@@ -335,6 +347,9 @@
             font-weight: 700;
             padding: 2px 6px;
             border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
         .source-tag.yt { background: #fee2e2; color: #dc2626; }
         .source-tag.zhihu { background: #eff6ff; color: #2563eb; }
@@ -374,25 +389,43 @@
         }
         .time-jump-link:hover { text-decoration: underline; }
 
-        /* ─── YouTube 历史流水列表 ─── */
+        /* ─── YouTube 历史流水列表 (支持日期折叠) ─── */
         .history-feed {
             flex: 1;
             overflow-y: auto;
             padding: 16px 20px;
         }
-        .date-group { margin-bottom: 24px; }
+        .date-group { margin-bottom: 20px; }
         .date-title {
             font-size: 13px;
             font-weight: 700;
             color: #0f172a;
-            padding-bottom: 8px;
-            margin-bottom: 12px;
+            padding: 8px 10px;
+            margin-bottom: 8px;
             border-bottom: 2px solid #e2e8f0;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            cursor: pointer;
+            user-select: none;
+            border-radius: 6px;
+            transition: background 0.15s;
         }
-        .date-title span { font-size: 11px; font-weight: 400; color: #94a3b8; }
+        .date-title:hover { background: #f1f5f9; }
+        .date-title-left { display: flex; align-items: center; gap: 8px; }
+        .date-collapse-icon {
+            font-size: 10px;
+            color: #64748b;
+            transition: transform 0.2s ease;
+            display: inline-block;
+        }
+        .date-group.collapsed .date-collapse-icon {
+            transform: rotate(-90deg);
+        }
+        .date-group.collapsed .date-group-content {
+            display: none;
+        }
+        .date-group-count { font-size: 11px; font-weight: 400; color: #94a3b8; }
 
         .history-card {
             display: flex;
@@ -447,6 +480,34 @@
             background: #d97706;
             border-radius: 2px;
             transition: width 0.3s;
+        }
+
+        /* ─── 任务管理专属样式 (Task Management) ─── */
+        .task-overview-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 14px;
+            padding: 16px 20px;
+            background: #ffffff;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .task-stat-card {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .task-stat-title { font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; }
+        .task-stat-val { font-size: 22px; font-weight: 800; color: #0f172a; line-height: 1.2; }
+        .task-stat-sub { font-size: 11px; color: #94a3b8; }
+
+        .task-feed {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 20px;
         }
 
         /* ─── 右侧收窄详情栏 (Context & Subtitle Stream) ─── */
@@ -569,6 +630,11 @@
             }
             .mobile-back-btn { display: inline-flex; }
 
+            .task-overview-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 8px;
+                padding: 12px;
+            }
             .search-input-group { flex-wrap: wrap; }
             .search-source-select { width: 100%; }
             .search-submit-btn { width: 100%; }
@@ -578,7 +644,7 @@
 </head>
 <body>
 
-    <!-- ─── 1. 桌面端全局侧边栏 (Tab 1: 搜索, Tab 2: YouTube, Tab 3: 知乎) ─── -->
+    <!-- ─── 1. 桌面端全局侧边栏 (Tab 1: 搜索, Tab 2: YouTube, Tab 3: 知乎, Tab 4: 任务管理) ─── -->
     <aside class="global-sidebar">
         <div class="brand">
             <div class="brand-logo">C</div>
@@ -589,16 +655,50 @@
         </div>
 
         <nav class="nav-tabs">
+            <!-- Tab 1: 全局搜索 -->
             <div class="nav-tab active" id="tab-nav-search" onclick="switchMainTab('search')">
-                <span>🔍 全局搜索</span>
+                <span class="nav-icon">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </span>
+                <span>全局搜索</span>
             </div>
+
+            <!-- Tab 2: YouTube 历史记录 (官方 YouTube 矢量图标) -->
             <div class="nav-tab" id="tab-nav-youtube" onclick="switchMainTab('youtube')">
-                <span>📺 YouTube 历史</span>
+                <span class="nav-icon">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+                        <path fill="#FF0000" d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.5 12 3.5 12 3.5s-7.505 0-9.377.55a3.016 3.016 0 0 0-2.122 2.136C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.55 9.376.55 9.376.55s7.505 0 9.377-.55a3.016 3.016 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814z"/>
+                        <path fill="#FFFFFF" d="m9.545 15.568 6.273-3.568-6.273-3.568v7.136z"/>
+                    </svg>
+                </span>
+                <span>YouTube 历史</span>
                 <span class="badge" id="navYtCount">0</span>
             </div>
+
+            <!-- Tab 3: 知乎历史记录 (官方知乎蓝色矢量图标) -->
             <div class="nav-tab" id="tab-nav-zhihu" onclick="switchMainTab('zhihu')">
-                <span>💡 知乎历史记录</span>
+                <span class="nav-icon">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+                        <rect width="24" height="24" rx="5" fill="#0084FF"/>
+                        <path fill="#FFF" d="M5.9 7.1h3.7v1.3H7.9c-.2 1.4-.7 3-1.6 4.3 1 .4 2 1 3.1 1.5l-.8 1.4c-1.2-.6-2.3-1.3-3.3-1.9-.7 1.3-1.7 2.2-2.8 3l-.8-1.2c1.1-.7 1.9-1.6 2.6-2.8-.6-.7-1.2-1.7-1.6-2.8l1.3-.4c.3.9.7 1.6 1.3 2.2.6-1.1 1-2.3 1.3-3.3H5.9V7.1zm7.5 0h1.5v2.9h2.3v1.3h-2.3v5.1c0 .9-.3 1.3-1.2 1.3-.7 0-2 0-3-.2l-.2-1.3c.7.1 1.7.2 2.2.2.3 0 .4-.1.4-.4v-4.7h-2.1v-1.3h2.1V7.1z"/>
+                    </svg>
+                </span>
+                <span>知乎历史记录</span>
                 <span class="badge">即将推出</span>
+            </div>
+
+            <!-- Tab 4: 任务管理 (实时任务进度与调度队列) -->
+            <div class="nav-tab" id="tab-nav-tasks" onclick="switchMainTab('tasks')">
+                <span class="nav-icon">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    </svg>
+                </span>
+                <span>任务管理</span>
+                <span class="badge" id="navTasksBadge">0</span>
             </div>
         </nav>
 
@@ -613,10 +713,15 @@
 
         <!-- ═════════ 视图 A：全局搜索 (Tab 1) ═════════ -->
         <section class="view-section active" id="view-search">
-            <!-- 左侧：宽敞的主搜索结果列表 (flex: 1) -->
             <div class="master-pane">
                 <div class="pane-header">
-                    <h2>🔍 全局知识检索</h2>
+                    <h2>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        全局知识检索
+                    </h2>
                     <span class="header-meta">台词级全文检索 (FTS5)</span>
                 </div>
 
@@ -628,7 +733,12 @@
                             <option value="zhihu">💡 知乎历史记录</option>
                         </select>
                         <div class="search-input-wrapper">
-                            <span class="search-icon">🔍</span>
+                            <span class="search-icon">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="11" cy="11" r="8"></circle>
+                                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                                </svg>
+                            </span>
                             <input type="text" class="search-input" id="searchInput" placeholder="检索台词、观点、关键词... (按 Enter 搜索)">
                         </div>
                         <button class="search-submit-btn" id="searchBtn" onclick="doSearch()">搜索</button>
@@ -644,7 +754,7 @@
                 </div>
             </div>
 
-            <!-- 右侧：收窄的上下文台词详情栏 (width: 380px) -->
+            <!-- 右侧：收窄的上下文台词详情栏 -->
             <div class="detail-pane" id="searchDetailPane">
                 <div class="detail-header">
                     <button class="mobile-back-btn" onclick="closeMobileDetail('searchDetailPane')">← 返回搜索列表</button>
@@ -664,12 +774,17 @@
             </div>
         </section>
 
-        <!-- ═════════ 视图 B：YouTube 历史记录 (Tab 2，移除搜索区，纯双栏) ═════════ -->
+        <!-- ═════════ 视图 B：YouTube 历史记录 (Tab 2，支持日期折叠) ═════════ -->
         <section class="view-section" id="view-youtube">
-            <!-- 左侧：宽敞的历史流水主列表 (flex: 1) -->
             <div class="master-pane">
                 <div class="pane-header">
-                    <h2>📺 YouTube 历史流水</h2>
+                    <h2>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+                            <path fill="#FF0000" d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.5 12 3.5 12 3.5s-7.505 0-9.377.55a3.016 3.016 0 0 0-2.122 2.136C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.55 9.376.55 9.376.55s7.505 0 9.377-.55a3.016 3.016 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814z"/>
+                            <path fill="#FFFFFF" d="m9.545 15.568 6.273-3.568-6.273-3.568v7.136z"/>
+                        </svg>
+                        YouTube 历史流水
+                    </h2>
                     <span class="header-meta" id="ytHistoryCount">加载中...</span>
                 </div>
 
@@ -702,7 +817,13 @@
         <section class="view-section" id="view-zhihu">
             <div class="master-pane" style="width:100%; border-right:none;">
                 <div class="pane-header">
-                    <h2>💡 知乎浏览历史</h2>
+                    <h2>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
+                            <rect width="24" height="24" rx="5" fill="#0084FF"/>
+                            <path fill="#FFF" d="M5.9 7.1h3.7v1.3H7.9c-.2 1.4-.7 3-1.6 4.3 1 .4 2 1 3.1 1.5l-.8 1.4c-1.2-.6-2.3-1.3-3.3-1.9-.7 1.3-1.7 2.2-2.8 3l-.8-1.2c1.1-.7 1.9-1.6 2.6-2.8-.6-.7-1.2-1.7-1.6-2.8l1.3-.4c.3.9.7 1.6 1.3 2.2.6-1.1 1-2.3 1.3-3.3H5.9V7.1zm7.5 0h1.5v2.9h2.3v1.3h-2.3v5.1c0 .9-.3 1.3-1.2 1.3-.7 0-2 0-3-.2l-.2-1.3c.7.1 1.7.2 2.2.2.3 0 .4-.1.4-.4v-4.7h-2.1v-1.3h2.1V7.1z"/>
+                        </svg>
+                        知乎浏览历史
+                    </h2>
                     <span class="header-meta">扩展模块</span>
                 </div>
                 <div class="empty-hint" style="padding: 100px 20px;">
@@ -715,21 +836,88 @@
             </div>
         </section>
 
+        <!-- ═════════ 视图 D：任务管理 (Tab 4，进行中与排队队列 + 总体概览) ═════════ -->
+        <section class="view-section" id="view-tasks">
+            <div class="master-pane" style="width:100%; border-right:none;">
+                <div class="pane-header">
+                    <h2>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                        </svg>
+                        任务调度与管理
+                    </h2>
+                    <span class="header-meta" id="taskRefreshMeta">每 3 秒实时轮询</span>
+                </div>
+
+                <!-- 总体统计概览卡片 -->
+                <div class="task-overview-grid">
+                    <div class="task-stat-card">
+                        <span class="task-stat-title">视频总收录数</span>
+                        <span class="task-stat-val" id="statTotalVideos">0</span>
+                        <span class="task-stat-sub">历史记录总量</span>
+                    </div>
+                    <div class="task-stat-card">
+                        <span class="task-stat-title">当前转写进行中</span>
+                        <span class="task-stat-val" id="statProcessing" style="color:#d97706;">0</span>
+                        <span class="task-stat-sub">并发数: 1 (CPU保护)</span>
+                    </div>
+                    <div class="task-stat-card">
+                        <span class="task-stat-title">队列等待排队</span>
+                        <span class="task-stat-val" id="statPending" style="color:#2563eb;">0</span>
+                        <span class="task-stat-sub">SJF 短作业优先调度</span>
+                    </div>
+                    <div class="task-stat-card">
+                        <span class="task-stat-title">已就绪字幕覆盖率</span>
+                        <span class="task-stat-val" id="statReadyCoverage" style="color:#16a34a;">0%</span>
+                        <span class="task-stat-sub" id="statReadySubCount">已就绪 0 部</span>
+                    </div>
+                </div>
+
+                <!-- 仅展示 processing 和 pending 任务的实时流 (完成自动移除) -->
+                <div class="task-feed" id="taskListFeed">
+                    <div class="empty-hint">加载任务队列中...</div>
+                </div>
+            </div>
+        </section>
+
     </main>
 
     <!-- ─── 3. 移动端底部导航栏 ─── -->
     <nav class="bottom-nav">
         <div class="bottom-nav-item active" id="bnav-search" onclick="switchMainTab('search')">
-            <span class="icon">🔍</span>
+            <span class="icon">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+            </span>
             <span>搜索</span>
         </div>
         <div class="bottom-nav-item" id="bnav-youtube" onclick="switchMainTab('youtube')">
-            <span class="icon">📺</span>
+            <span class="icon">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+                    <path fill="#FF0000" d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.5 12 3.5 12 3.5s-7.505 0-9.377.55a3.016 3.016 0 0 0-2.122 2.136C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.55 9.376.55 9.376.55s7.505 0 9.377-.55a3.016 3.016 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814z"/>
+                    <path fill="#FFFFFF" d="m9.545 15.568 6.273-3.568-6.273-3.568v7.136z"/>
+                </svg>
+            </span>
             <span>YouTube</span>
         </div>
         <div class="bottom-nav-item" id="bnav-zhihu" onclick="switchMainTab('zhihu')">
-            <span class="icon">💡</span>
+            <span class="icon">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none">
+                    <rect width="24" height="24" rx="4" fill="#0084FF"/>
+                    <path fill="#FFF" d="M5.9 7.1h3.7v1.3H7.9c-.2 1.4-.7 3-1.6 4.3 1 .4 2 1 3.1 1.5l-.8 1.4c-1.2-.6-2.3-1.3-3.3-1.9-.7 1.3-1.7 2.2-2.8 3l-.8-1.2c1.1-.7 1.9-1.6 2.6-2.8-.6-.7-1.2-1.7-1.6-2.8l1.3-.4c.3.9.7 1.6 1.3 2.2.6-1.1 1-2.3 1.3-3.3H5.9V7.1zm7.5 0h1.5v2.9h2.3v1.3h-2.3v5.1c0 .9-.3 1.3-1.2 1.3-.7 0-2 0-3-.2l-.2-1.3c.7.1 1.7.2 2.2.2.3 0 .4-.1.4-.4v-4.7h-2.1v-1.3h2.1V7.1z"/>
+                </svg>
+            </span>
             <span>知乎</span>
+        </div>
+        <div class="bottom-nav-item" id="bnav-tasks" onclick="switchMainTab('tasks')">
+            <span class="icon">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                </svg>
+            </span>
+            <span>任务</span>
         </div>
     </nav>
 

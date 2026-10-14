@@ -177,6 +177,11 @@ async def history_feed():
     """获取按日期分组的历史记录列表，包含状态、进度与耗时"""
     return database.get_history_feed()
 
+@app.get("/api/tasks")
+async def tasks_api():
+    """获取任务管理数据：总体概览统计，进行中与排队中任务列表"""
+    return database.get_tasks()
+
 @app.get("/api/status")
 async def status():
     stats = database.get_stats()

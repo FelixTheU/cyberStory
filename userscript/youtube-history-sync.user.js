@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         cyberstory - YouTube History Sync
 // @namespace    https://cyberstory.local
-// @version      1.5.0
-// @description  基于绝对 ts_id (时间戳*1000+倒序seq) 与 range 范围探测的 YouTube 历史智能同步 (支持常规增量追加与深度回溯插入)
+// @version      1.6.0
+// @description  自动扫描 YouTube 历史记录 (工作前自动刷新以获取最新历史，绝对 ts-id 与 range 智能差量探测入库)
 // @author       cyberstory
 // @match        https://www.youtube.com/feed/history*
 // @grant        GM_getValue
@@ -15,18 +15,17 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '1.5.0';
+    const SCRIPT_VERSION = '1.6.0';
     const API_BASE = 'http://127.0.0.1:8765';
-    const SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟
+    const SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟轮询
 
     let syncing = false;
     let autoScrolling = false;
 
-    // ─── 1. UI: 胶囊与操作弹窗面板 (纯 DOM 安全构建，适配 YouTube Trusted Types) ───
+    // ─── 1. UI: 胶囊与操作控制台 ───
     function injectUI() {
         if (document.getElementById('cyber-history-capsule')) return;
 
-        // 样式注入
         const style = document.createElement('style');
         style.textContent = `
             #cyber-history-capsule {
@@ -90,7 +89,6 @@
         `;
         document.head.appendChild(style);
 
-        // 胶囊容器
         const capsule = document.createElement('div');
         capsule.id = 'cyber-history-capsule';
 
@@ -101,13 +99,13 @@
 
         const statusEl = document.createElement('span');
         statusEl.id = 'chStatus';
-        statusEl.textContent = 'CyberHistory: 初始化...';
+        statusEl.textContent = 'CyberHistory: 就绪';
         capsule.appendChild(statusEl);
 
         const syncBtn = document.createElement('button');
         syncBtn.className = 'ch-btn';
         syncBtn.id = 'chSyncBtn';
-        syncBtn.textContent = '智能同步';
+        syncBtn.textContent = '刷新并同步';
         capsule.appendChild(syncBtn);
 
         const toggleBtn = document.createElement('button');
@@ -125,7 +123,7 @@
         const mHeader = document.createElement('div');
         mHeader.className = 'ch-modal-header';
         const mTitle = document.createElement('h4');
-        mTitle.textContent = 'YouTube 历史同步控制台 (ts-id 架构)';
+        mTitle.textContent = 'YouTube 历史同步控制台 (v1.6.0)';
         mHeader.appendChild(mTitle);
         const mClose = document.createElement('button');
         mClose.className = 'ch-modal-close';
@@ -171,7 +169,7 @@
         const btnSyncNow = document.createElement('button');
         btnSyncNow.className = 'ch-action-btn ch-btn-primary';
         btnSyncNow.id = 'btnSyncCurrent';
-        btnSyncNow.textContent = '⚡ 智能同步当前可见差量';
+        btnSyncNow.textContent = '🔄 刷新页面并智能同步最新记录';
         actGroup.appendChild(btnSyncNow);
 
         const rowBacktrack = document.createElement('div');
@@ -183,19 +181,19 @@
         selTarget.style.cssText = 'padding:6px; border-radius:6px; border:1px solid #cbd5e1; font-size:12px; flex:1;';
 
         const opt1M = document.createElement('option');
-        opt1M.value = '25'; opt1M.textContent = '同步最近 1 个月 (滚动约25屏)';
+        opt1M.value = '25'; opt1M.textContent = '回溯 1 个月 (滚动约25屏)';
         selTarget.appendChild(opt1M);
 
-        const opt3M = document.createElement('option');
-        opt3M.value = '60'; opt3M.textContent = '同步最近 3 个月 (滚动约60屏)';
-        selTarget.appendChild(opt3M);
+        const opt4M = document.createElement('option');
+        opt4M.value = '80'; opt4M.selected = true; opt4M.textContent = '回溯 4 个月 (滚动约80屏)';
+        selTarget.appendChild(opt4M);
 
         const opt6M = document.createElement('option');
-        opt6M.value = '120'; opt6M.textContent = '同步最近 6 个月 (滚动约120屏)';
+        opt6M.value = '120'; opt6M.textContent = '回溯 6 个月 (滚动约120屏)';
         selTarget.appendChild(opt6M);
 
         const opt1Y = document.createElement('option');
-        opt1Y.value = '240'; opt1Y.textContent = '同步最近 1 年 (滚动约240屏)';
+        opt1Y.value = '240'; opt1Y.textContent = '回溯 1 年 (滚动约240屏)';
         selTarget.appendChild(opt1Y);
 
         rowBacktrack.appendChild(selTarget);
@@ -220,10 +218,10 @@
         document.body.appendChild(modal);
 
         // 绑定事件
-        syncBtn.addEventListener('click', () => doSmartSync());
+        syncBtn.addEventListener('click', triggerSyncWithPageReload);
         toggleBtn.addEventListener('click', toggleModal);
         mClose.addEventListener('click', () => modal.classList.remove('show'));
-        btnSyncNow.addEventListener('click', () => { modal.classList.remove('show'); doSmartSync(); });
+        btnSyncNow.addEventListener('click', () => { modal.classList.remove('show'); triggerSyncWithPageReload(); });
         btnDeepSync.addEventListener('click', handleDeepBacktrackSync);
         btnStop.addEventListener('click', () => { autoScrolling = false; });
     }
@@ -331,7 +329,6 @@
 
             const midnightTs = parseDateToMidnightTs(dateLabel);
 
-            // 查找该 section 下的所有卡片
             const cards = Array.from(sec.querySelectorAll('yt-lockup-view-model, ytd-video-renderer, ytm-shorts-lockup-view-model, ytd-reel-item-renderer, yt-shorts-lockup-view-model'));
             const validCardsInSec = [];
 
@@ -356,9 +353,6 @@
                 validCardsInSec.push({ card, videoId, isShort, link });
             });
 
-            // 核心设计：组内共有 n 个视频，页面自上而下顺序的“倒序”编号 001, 002, 003...
-            // 最底端最早看的: seq = 1
-            // 最顶端最晚看的: seq = n
             const n = validCardsInSec.length;
             validCardsInSec.forEach((itemObj, idxFromTop) => {
                 const seq = n - idxFromTop; // 1 <= seq <= n
@@ -422,8 +416,19 @@
         return allItems;
     }
 
-    // ─── 5. 基于 Range 的差量探测与智能同步 ───
-    async function doSmartSync() {
+    // ─── 5. 工作前刷新逻辑：设置标记后刷新页面，加载完自动触发同步 ───
+    function triggerSyncWithPageReload() {
+        if (syncing) return;
+        const statusEl = document.getElementById('chStatus');
+        if (statusEl) statusEl.textContent = 'CyberHistory: 刷新页面以获取最新历史...';
+        try {
+            sessionStorage.setItem('ch_auto_sync_after_reload', 'true');
+        } catch (e) {}
+        window.location.reload();
+    }
+
+    // ─── 6. 核心差量同步执行函数 ───
+    async function executeDirectSync() {
         if (syncing) return;
         syncing = true;
         const syncBtn = document.getElementById('chSyncBtn');
@@ -440,12 +445,10 @@
         }
 
         try {
-            // 步骤 1: 获取服务端已有的 ts_id 范围
             const rangeRes = await fetch(`${API_BASE}/api/sync/range`);
             const rangeData = await rangeRes.json();
 
-            // 步骤 2: 扫描当前展开的所有卡片并计算绝对 ts_id
-            if (statusEl) statusEl.textContent = 'CyberHistory: 计算 ts-id...';
+            if (statusEl) statusEl.textContent = 'CyberHistory: 计算最新 ts-id...';
             const allItems = extractAllCardsWithTsId();
 
             let toInsert = [];
@@ -459,10 +462,7 @@
                 const maxTsId = rangeData.max_ts_id;
                 const minTsId = rangeData.min_ts_id;
 
-                // 核心设计：基于 range 判定哪些记录是未入库的
-                // 1. 尾部追加项 (比已入库最新的还新)
                 const tailItems = allItems.filter(i => i.ts_id > maxTsId);
-                // 2. 头部插入项 (比已入库最老的还老)
                 const headItems = allItems.filter(i => i.ts_id < minTsId);
 
                 tailCount = tailItems.length;
@@ -478,12 +478,10 @@
                 return;
             }
 
-            // 按 ts_id 递增顺序排序入库 (时间由旧至新自然追加)
             toInsert.sort((a, b) => a.ts_id - b.ts_id);
 
             if (statusEl) statusEl.textContent = `CyberHistory: 入库中 (新追加${tailCount}, 历史${headCount})...`;
 
-            // 分批上报 (每批 200 条，防止超大包超时)
             let totalInserted = 0;
             const batchSize = 200;
             for (let i = 0; i < toInsert.length; i += batchSize) {
@@ -507,13 +505,13 @@
         if (syncBtn) syncBtn.disabled = false;
     }
 
-    // ─── 6. 深度回溯滚动与同步处理器 ───
+    // ─── 7. 深度回溯滚动与同步处理器 ───
     async function handleDeepBacktrackSync() {
         const modal = document.getElementById('ch-op-modal');
         if (modal) modal.classList.remove('show');
 
         const select = document.getElementById('selectBacktrackTarget');
-        const maxScrolls = parseInt(select ? select.value : '60', 10) || 60;
+        const maxScrolls = parseInt(select ? select.value : '80', 10) || 80;
         const statusEl = document.getElementById('chStatus');
         const stopBtn = document.getElementById('btnStopScroll');
 
@@ -531,16 +529,30 @@
         if (stopBtn) stopBtn.style.display = 'none';
         autoScrolling = false;
 
-        // 滚动完成后自动执行基于 ts-id range 的差量入库
-        doSmartSync();
+        executeDirectSync();
     }
 
-    window.__cyberHistorySync = doSmartSync;
+    window.__cyberHistorySync = executeDirectSync;
+    window.__triggerSyncWithReload = triggerSyncWithPageReload;
     window.__extractAllCardsWithTsId = extractAllCardsWithTsId;
 
-    // ─── 初始化与心跳 ───
+    // ─── 8. 页面加载初始化 ───
     injectUI();
-    setTimeout(() => doSmartSync(), 2500);
-    setInterval(() => doSmartSync(), SYNC_INTERVAL_MS);
     checkHealth();
+
+    // 检查是否由刷新触发
+    let shouldSync = false;
+    try {
+        if (sessionStorage.getItem('ch_auto_sync_after_reload') === 'true') {
+            sessionStorage.removeItem('ch_auto_sync_after_reload');
+            shouldSync = true;
+        }
+    } catch (e) {}
+
+    if (shouldSync) {
+        setTimeout(() => executeDirectSync(), 2500);
+    }
+
+    // 定时轮询：每次工作时先刷新页面以获取最新历史记录
+    setInterval(() => triggerSyncWithPageReload(), SYNC_INTERVAL_MS);
 })();

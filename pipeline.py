@@ -56,15 +56,22 @@ def try_fetch_subtitles(video_id: str) -> Optional[List[Dict[str, Any]]]:
     subs_dir = config.TEMP_DIR / "subs"
     subs_dir.mkdir(parents=True, exist_ok=True)
 
+    ytdlp_bin = getattr(config, "YT_DLP_BIN", "yt-dlp")
     cmd = [
-        "yt-dlp",
+        str(ytdlp_bin),
         "--skip-download",
         "--write-sub", "--write-auto-sub",
-        "--sub-lang", "zh-Hans,zh,zh-Hant,en",
+        "--sub-lang", "zh-Hans,zh,zh-Hant,en,zh-Hans-zh,zh-Hant-zh,.*zh.*,.*en.*",
         "--sub-format", "vtt",
+        "--js-runtimes", "node:C:/Program Files/nodejs/node.exe",
+        "--remote-components", "ejs:github",
         "-o", str(subs_dir / f"{video_id}.%(ext)s"),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
+
+    cookie_file = config.DATA_DIR / "youtube_cookies.txt"
+    if cookie_file.exists():
+        cmd.extend(["--cookies", str(cookie_file)])
 
     if config.PROXY_URL:
         cmd.insert(1, "--proxy")
@@ -157,13 +164,20 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
         pass
 
     # 2. 完整音频下载：不截断，拉取全长音频
+    ytdlp_bin = getattr(config, "YT_DLP_BIN", "yt-dlp")
     audio_path = audio_dir / f"{video_id}.opus"
     cmd = [
-        "yt-dlp",
+        str(ytdlp_bin),
         "-x", "--audio-format", "opus", "--audio-quality", "0",
+        "--js-runtimes", "node:C:/Program Files/nodejs/node.exe",
+        "--remote-components", "ejs:github",
         "-o", str(audio_path),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
+
+    cookie_file = config.DATA_DIR / "youtube_cookies.txt"
+    if cookie_file.exists():
+        cmd.extend(["--cookies", str(cookie_file)])
 
     if config.PROXY_URL:
         cmd.insert(1, "--proxy")
@@ -204,7 +218,6 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
         segments_gen, info = model.transcribe(
             str(actual_path),
             beam_size=5,
-            language="zh",
             vad_filter=True, # 启用 VAD 静音切除，提升转写效率并跳过长静音
             vad_parameters=dict(min_silence_duration_ms=500)
         )

@@ -520,3 +520,56 @@ def get_stats() -> Dict[str, Any]:
         "failed": failed,
         "total_segments": total_segments
     }
+
+def get_tasks() -> Dict[str, Any]:
+    """获取任务管理数据：总体概览统计，以及仅处于 processing 和 pending 中的任务列表 (完成自动移除)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    stats = get_stats()
+    
+    # 仅查询进行中 (processing) 与排队中 (pending) 的任务
+    cursor.execute("""
+    SELECT ts_id, ts_id AS id, source_id, title, author, url, duration_sec, thumbnail_url,
+           watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at,
+           (strftime('%s', 'now') - strftime('%s', updated_at)) as live_elapsed_sec
+    FROM items
+    WHERE status IN ('processing', 'pending')
+    ORDER BY 
+        CASE WHEN status = 'processing' THEN 0 ELSE 1 END ASC,
+        CASE WHEN duration_sec <= 0 THEN 999999 ELSE duration_sec END ASC,
+        ts_id DESC
+    LIMIT 200;
+    """)
+    rows = cursor.fetchall()
+    
+    tasks = []
+    for r in rows:
+        d = dict(r)
+        d["duration_str"] = _format_time(d["duration_sec"]) if d["duration_sec"] else "00:00"
+        cost_sec = d.get("cost_time_sec") or 0.0
+        if d.get("status") == "processing" and cost_sec <= 0:
+            cost_sec = float(d.get("live_elapsed_sec") or 0.0)
+            
+        if cost_sec >= 60:
+            m = int(cost_sec // 60)
+            s = int(cost_sec % 60)
+            d["cost_time_str"] = f"{m}m{s}s"
+        else:
+            d["cost_time_str"] = f"{int(cost_sec)}s"
+            
+        tasks.append(d)
+        
+    conn.close()
+    
+    total = stats.get("total_videos", 0)
+    ready = stats.get("ready", 0)
+    coverage = round((ready / total * 100), 1) if total > 0 else 0.0
+    
+    return {
+        "summary": {
+            **stats,
+            "sub_coverage_pct": coverage
+        },
+        "tasks": tasks
+    }

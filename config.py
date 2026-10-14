@@ -11,6 +11,11 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 # 数据库路径
 DB_PATH = DATA_DIR / "cyber_history.db"
 
+# yt-dlp 可执行文件路径
+YT_DLP_BIN = os.environ.get("CYBER_YTDLP", r"C:\Users\yview\.local\bin\yt-dlp.exe")
+if not Path(YT_DLP_BIN).exists():
+    YT_DLP_BIN = "yt-dlp"
+
 # 服务端口与主机
 HOST = "0.0.0.0"
 PORT = 8765
