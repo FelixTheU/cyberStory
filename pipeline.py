@@ -143,11 +143,21 @@ def parse_vtt(vtt_path: Path) -> List[Dict[str, Any]]:
 
 
 def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[List[Dict[str, Any]]]:
-    """使用 faster-whisper 进行本地 ASR 转写"""
+    """使用 faster-whisper 进行本地 ASR 转写 (含 CPU 限流、长视频限额截取与 VAD 加速)"""
     audio_dir = config.TEMP_DIR / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
-    # 下载音频
+    # 1. 设置当前进程为低于正常优先级 (BELOW_NORMAL_PRIORITY_CLASS)，避免 ASR 抢占前台交互
+    try:
+        import psutil
+        p = psutil.Process()
+        if hasattr(psutil, "BELOW_NORMAL_PRIORITY_CLASS"):
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
+
+    # 2. 长视频截断：只下载前 MAX_ASR_DURATION_SEC (默认45分钟) 的音频切片，节约带宽与时间
+    max_asr_sec = getattr(config, "MAX_ASR_DURATION_SEC", 2700)
     audio_path = audio_dir / f"{video_id}.opus"
     cmd = [
         "yt-dlp",
@@ -155,6 +165,13 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
         "-o", str(audio_path),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
+    if max_asr_sec > 0:
+        h = max_asr_sec // 3600
+        m = (max_asr_sec % 3600) // 60
+        s = max_asr_sec % 60
+        section_str = f"*00:00:00-{h:02d}:{m:02d}:{s:02d}"
+        cmd.extend(["--download-sections", section_str])
+
     if config.PROXY_URL:
         cmd.insert(1, "--proxy")
         cmd.insert(2, config.PROXY_URL)
@@ -178,7 +195,7 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
             database.update_item_status(item_id, status="processing", current_step="Whisper模型加载", progress_pct=40, cost_time_sec=elapsed)
 
         from faster_whisper import WhisperModel
-        # 显式限制 CPU 核心数与 worker 数，防止跑满宿主机 CPU
+        # 显式限制 CPU 核心数 (默认 2 线程) 与 worker 数，防止跑满宿主机 CPU
         model = WhisperModel(
             config.WHISPER_MODEL,
             device=config.WHISPER_DEVICE,
@@ -195,15 +212,22 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
             str(actual_path),
             beam_size=5,
             language="zh",
-            vad_filter=True,
+            vad_filter=True, # 启用 VAD 静音切除，提升转写效率并跳过长静音
             vad_parameters=dict(min_silence_duration_ms=500)
         )
 
         segments = []
         total_duration = info.duration if hasattr(info, 'duration') and info.duration else 0
+        if max_asr_sec > 0 and total_duration > max_asr_sec:
+            total_duration = max_asr_sec
+
         last_progress_update = time.time()
 
         for seg in segments_gen:
+            # 严格控制识别上限，避免超长视频长时间占用算力
+            if max_asr_sec > 0 and seg.start >= max_asr_sec:
+                break
+
             segments.append({
                 "start": seg.start,
                 "end": seg.end,
@@ -213,7 +237,7 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
             now = time.time()
             if item_id and total_duration > 0 and (now - last_progress_update > 3.0):
                 last_progress_update = now
-                calc_pct = int(50 + (seg.end / total_duration) * 45)
+                calc_pct = int(50 + (min(seg.end, total_duration) / total_duration) * 45)
                 calc_pct = min(98, max(50, calc_pct))
                 elapsed = now - t0 if t0 else 0
                 database.update_item_status(item_id, status="processing", current_step="Whisper语音推理中", progress_pct=calc_pct, cost_time_sec=elapsed)
