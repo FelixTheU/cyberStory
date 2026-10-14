@@ -22,6 +22,7 @@ logger = logging.getLogger("CyberHistory")
 # --- Pydantic Models ---
 
 class VideoMeta(BaseModel):
+    ts_id: Optional[int] = None
     videoId: str
     title: str = ""
     channel: str = ""
@@ -29,7 +30,6 @@ class VideoMeta(BaseModel):
     duration_sec: int = 0
     thumbnail: Optional[str] = None
     watchedDate: str = ""
-    seq_order: int = 0
 
 class SyncRequest(BaseModel):
     items: List[VideoMeta]
@@ -119,33 +119,42 @@ async def index():
 async def health():
     return {"status": "ok", "service": "cyberstory"}
 
+@app.get("/api/sync/range")
+async def sync_range():
+    """获取服务端已入库的 ts_id 范围 (min_ts_id 与 max_ts_id)"""
+    return database.get_ts_range()
+
 @app.get("/api/sync/latest_cursor")
 async def latest_cursor():
-    """获取服务端历史流水中的最后一条记录 (最新观看) 作为分界线游标"""
-    cursor_item = database.get_latest_cursor()
-    if cursor_item:
+    """向后兼容游标接口"""
+    r = database.get_ts_range()
+    if r.get("has_data") and r.get("max_item"):
+        m = r["max_item"]
         return {
             "has_cursor": True,
-            "cursor_id": cursor_item["source_id"],
-            "item_id": cursor_item["id"],
-            "title": cursor_item["title"],
-            "watched_at": cursor_item.get("watched_at", "")
+            "cursor_id": m["source_id"],
+            "item_id": m["ts_id"],
+            "title": m["title"],
+            "watched_at": m.get("watched_at", "")
         }
     return {"has_cursor": False, "cursor_id": None}
 
 @app.get("/api/sync/cursors")
 async def dual_cursors():
-    """获取双游标分界线：head_cursor (最老，用于回溯插入) 与 tail_cursor (最新，用于常规追加)"""
-    return database.get_dual_cursors()
+    """向后兼容双游标接口"""
+    r = database.get_ts_range()
+    return {
+        "has_cursor": r.get("has_data", False),
+        "head_cursor": r.get("min_item"),
+        "tail_cursor": r.get("max_item"),
+        "total_items": r.get("total", 0)
+    }
 
 @app.post("/api/sync/youtube")
-async def sync_youtube(
-    req: SyncRequest,
-    direction: str = Query("tail_append", description="tail_append (向未来追加) 或 head_prepend (向过去回溯插入)")
-):
+async def sync_youtube(req: SyncRequest):
     items_data = [item.model_dump() for item in req.items]
-    result = database.insert_items(items_data, direction=direction)
-    logger.info(f"Sync received ({direction}): inserted={result['inserted']}")
+    result = database.insert_items(items_data)
+    logger.info(f"Sync received: inserted={result['inserted']}, ignored={result['ignored']}")
     return {"success": True, **result}
 
 @app.get("/api/search")

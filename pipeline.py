@@ -18,7 +18,7 @@ logger = logging.getLogger("cyberstory.Pipeline")
 def process_item(item: Dict[str, Any]):
     """处理单个视频：先尝试抓字幕，无字幕则降级 ASR，并实时更新进度与耗时"""
     source_id = item["source_id"]
-    item_id = item["id"]
+    item_id = item.get("ts_id") or item["id"]
     t0 = time.time()
 
     # 标记为 processing

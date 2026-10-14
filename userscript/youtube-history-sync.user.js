@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         cyberstory - YouTube History Sync
 // @namespace    https://cyberstory.local
-// @version      1.4.0
-// @description  自动扫描 YouTube 历史记录 (支持双游标自动推算：尾部追加最新 + 头部回溯插入，附控制台操作窗口)
+// @version      1.5.0
+// @description  基于绝对 ts_id (时间戳*1000+倒序seq) 与 range 范围探测的 YouTube 历史智能同步 (支持常规增量追加与深度回溯插入)
 // @author       cyberstory
 // @match        https://www.youtube.com/feed/history*
 // @grant        GM_getValue
@@ -15,18 +15,18 @@
 (function () {
     'use strict';
 
-    const SCRIPT_VERSION = '1.4.0';
+    const SCRIPT_VERSION = '1.5.0';
     const API_BASE = 'http://127.0.0.1:8765';
     const SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 分钟
 
     let syncing = false;
     let autoScrolling = false;
 
-    // ─── 1. UI: 胶囊与操作弹窗面板 (严格适配 YouTube Trusted Types，纯 DOM 构建) ───
+    // ─── 1. UI: 胶囊与操作弹窗面板 (纯 DOM 安全构建，适配 YouTube Trusted Types) ───
     function injectUI() {
         if (document.getElementById('cyber-history-capsule')) return;
 
-        // 注入样式
+        // 样式注入
         const style = document.createElement('style');
         style.textContent = `
             #cyber-history-capsule {
@@ -107,13 +107,13 @@
         const syncBtn = document.createElement('button');
         syncBtn.className = 'ch-btn';
         syncBtn.id = 'chSyncBtn';
-        syncBtn.textContent = '立即同步';
+        syncBtn.textContent = '智能同步';
         capsule.appendChild(syncBtn);
 
         const toggleBtn = document.createElement('button');
         toggleBtn.className = 'ch-btn-sub';
         toggleBtn.id = 'chToggleModalBtn';
-        toggleBtn.textContent = '⚙ 选项';
+        toggleBtn.textContent = '⚙ 控制台';
         capsule.appendChild(toggleBtn);
 
         document.body.appendChild(capsule);
@@ -125,7 +125,7 @@
         const mHeader = document.createElement('div');
         mHeader.className = 'ch-modal-header';
         const mTitle = document.createElement('h4');
-        mTitle.textContent = 'YouTube 历史双向同步控制台';
+        mTitle.textContent = 'YouTube 历史同步控制台 (ts-id 架构)';
         mHeader.appendChild(mTitle);
         const mClose = document.createElement('button');
         mClose.className = 'ch-modal-close';
@@ -137,25 +137,25 @@
         const infoBox = document.createElement('div');
         infoBox.className = 'ch-info-box';
         infoBox.id = 'chCursorInfo';
-        
-        const rowTail = document.createElement('div');
-        rowTail.textContent = '最新分界 (Tail): ';
-        const bTail = document.createElement('b');
-        bTail.id = 'infoTailCursor';
-        bTail.textContent = '加载中...';
-        rowTail.appendChild(bTail);
-        infoBox.appendChild(rowTail);
 
-        const rowHead = document.createElement('div');
-        rowHead.textContent = '最老分界 (Head): ';
-        const bHead = document.createElement('b');
-        bHead.id = 'infoHeadCursor';
-        bHead.textContent = '加载中...';
-        rowHead.appendChild(bHead);
-        infoBox.appendChild(rowHead);
+        const rowMax = document.createElement('div');
+        rowMax.textContent = '库内上限 (最新): ';
+        const bMax = document.createElement('b');
+        bMax.id = 'infoMaxTsId';
+        bMax.textContent = '加载中...';
+        rowMax.appendChild(bMax);
+        infoBox.appendChild(rowMax);
+
+        const rowMin = document.createElement('div');
+        rowMin.textContent = '库内下限 (最老): ';
+        const bMin = document.createElement('b');
+        bMin.id = 'infoMinTsId';
+        bMin.textContent = '加载中...';
+        rowMin.appendChild(bMin);
+        infoBox.appendChild(rowMin);
 
         const rowTotal = document.createElement('div');
-        rowTotal.textContent = '库内视频基准总数: ';
+        rowTotal.textContent = '库内视频总数: ';
         const bTotal = document.createElement('b');
         bTotal.id = 'infoTotalVideos';
         bTotal.textContent = '-';
@@ -164,63 +164,67 @@
 
         modal.appendChild(infoBox);
 
-        // 操作按钮组
+        // 操作组
         const actGroup = document.createElement('div');
         actGroup.className = 'ch-actions-group';
 
-        const btnTail = document.createElement('button');
-        btnTail.className = 'ch-action-btn ch-btn-primary';
-        btnTail.id = 'btnSyncTail';
-        btnTail.textContent = '▶ 同步最新观看 (尾部追加)';
-        actGroup.appendChild(btnTail);
+        const btnSyncNow = document.createElement('button');
+        btnSyncNow.className = 'ch-action-btn ch-btn-primary';
+        btnSyncNow.id = 'btnSyncCurrent';
+        btnSyncNow.textContent = '⚡ 智能同步当前可见差量';
+        actGroup.appendChild(btnSyncNow);
 
-        const rowPrepend = document.createElement('div');
-        rowPrepend.style.display = 'flex';
-        rowPrepend.style.gap = '6px';
+        const rowBacktrack = document.createElement('div');
+        rowBacktrack.style.display = 'flex';
+        rowBacktrack.style.gap = '6px';
 
         const selTarget = document.createElement('select');
         selTarget.id = 'selectBacktrackTarget';
         selTarget.style.cssText = 'padding:6px; border-radius:6px; border:1px solid #cbd5e1; font-size:12px; flex:1;';
-        
-        const opt60 = document.createElement('option');
-        opt60.value = '60'; opt60.textContent = '回溯半年 (自动滚动约60屏)';
-        selTarget.appendChild(opt60);
 
-        const opt120 = document.createElement('option');
-        opt120.value = '120'; opt120.textContent = '回溯一年 (自动滚动约120屏)';
-        selTarget.appendChild(opt120);
+        const opt1M = document.createElement('option');
+        opt1M.value = '25'; opt1M.textContent = '同步最近 1 个月 (滚动约25屏)';
+        selTarget.appendChild(opt1M);
 
-        const optCurr = document.createElement('option');
-        optCurr.value = 'current'; optCurr.textContent = '仅同步当前已展开的历史';
-        selTarget.appendChild(optCurr);
+        const opt3M = document.createElement('option');
+        opt3M.value = '60'; opt3M.textContent = '同步最近 3 个月 (滚动约60屏)';
+        selTarget.appendChild(opt3M);
 
-        rowPrepend.appendChild(selTarget);
+        const opt6M = document.createElement('option');
+        opt6M.value = '120'; opt6M.textContent = '同步最近 6 个月 (滚动约120屏)';
+        selTarget.appendChild(opt6M);
 
-        const btnHead = document.createElement('button');
-        btnHead.className = 'ch-action-btn ch-btn-secondary';
-        btnHead.id = 'btnSyncHead';
-        btnHead.style.cssText = 'width:auto; padding:6px 12px;';
-        btnHead.textContent = '⏬ 回溯同步 (头部插入)';
-        rowPrepend.appendChild(btnHead);
+        const opt1Y = document.createElement('option');
+        opt1Y.value = '240'; opt1Y.textContent = '同步最近 1 年 (滚动约240屏)';
+        selTarget.appendChild(opt1Y);
 
-        actGroup.appendChild(rowPrepend);
+        rowBacktrack.appendChild(selTarget);
+
+        const btnDeepSync = document.createElement('button');
+        btnDeepSync.className = 'ch-action-btn ch-btn-secondary';
+        btnDeepSync.id = 'btnDeepSync';
+        btnDeepSync.style.cssText = 'width:auto; padding:6px 12px;';
+        btnDeepSync.textContent = '⏬ 深度回溯同步';
+        rowBacktrack.appendChild(btnDeepSync);
+
+        actGroup.appendChild(rowBacktrack);
 
         const btnStop = document.createElement('button');
         btnStop.className = 'ch-action-btn ch-btn-warn';
         btnStop.id = 'btnStopScroll';
         btnStop.style.display = 'none';
-        btnStop.textContent = '⏹ 停止自动滚动';
+        btnStop.textContent = '⏹ 停止滚动';
         actGroup.appendChild(btnStop);
 
         modal.appendChild(actGroup);
         document.body.appendChild(modal);
 
         // 绑定事件
-        syncBtn.addEventListener('click', () => doSmartSync('auto'));
+        syncBtn.addEventListener('click', () => doSmartSync());
         toggleBtn.addEventListener('click', toggleModal);
         mClose.addEventListener('click', () => modal.classList.remove('show'));
-        btnTail.addEventListener('click', () => { modal.classList.remove('show'); doSmartSync('tail_only'); });
-        btnHead.addEventListener('click', handleBacktrackSync);
+        btnSyncNow.addEventListener('click', () => { modal.classList.remove('show'); doSmartSync(); });
+        btnDeepSync.addEventListener('click', handleDeepBacktrackSync);
         btnStop.addEventListener('click', () => { autoScrolling = false; });
     }
 
@@ -229,18 +233,26 @@
         if (!modal) return;
         modal.classList.toggle('show');
         if (modal.classList.contains('show')) {
-            updateModalCursorInfo();
+            updateModalInfo();
         }
     }
 
-    async function updateModalCursorInfo() {
+    async function updateModalInfo() {
         try {
-            const res = await fetch(`${API_BASE}/api/sync/cursors`);
+            const res = await fetch(`${API_BASE}/api/sync/range`);
             if (res.ok) {
                 const data = await res.json();
-                document.getElementById('infoTailCursor').textContent = data.tail_cursor ? `${data.tail_cursor.watched_at} (${data.tail_cursor.title.slice(0, 16)}...)` : '无';
-                document.getElementById('infoHeadCursor').textContent = data.head_cursor ? `${data.head_cursor.watched_at} (${data.head_cursor.title.slice(0, 16)}...)` : '无';
-                document.getElementById('infoTotalVideos').textContent = `${data.total_items} 部`;
+                if (data.has_data) {
+                    const maxDate = data.max_item ? `${data.max_item.watched_at} (${data.max_item.title.slice(0, 14)}...)` : data.max_ts_id;
+                    const minDate = data.min_item ? `${data.min_item.watched_at} (${data.min_item.title.slice(0, 14)}...)` : data.min_ts_id;
+                    document.getElementById('infoMaxTsId').textContent = `${maxDate}`;
+                    document.getElementById('infoMinTsId').textContent = `${minDate}`;
+                    document.getElementById('infoTotalVideos').textContent = `${data.total} 部`;
+                } else {
+                    document.getElementById('infoMaxTsId').textContent = '库内无数据';
+                    document.getElementById('infoMinTsId').textContent = '库内无数据';
+                    document.getElementById('infoTotalVideos').textContent = '0 部';
+                }
             }
         } catch (e) {}
     }
@@ -261,17 +273,41 @@
         return false;
     }
 
-    // ─── 3. 获取服务端双游标 ───
-    async function fetchDualCursors() {
-        try {
-            const res = await fetch(`${API_BASE}/api/sync/cursors`, { signal: AbortSignal.timeout(4000) });
-            if (res.ok) {
-                return await res.json();
-            }
-        } catch (e) {
-            console.warn('Failed to fetch dual cursors', e);
+    // ─── 3. 时间与日期解析辅助函数 ───
+    function parseDateToMidnightTs(dateStr) {
+        const s = dateStr ? dateStr.trim() : '';
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+
+        if (s.includes('今天') || s.includes('Today')) {
+            return Math.floor(today.getTime() / 1000);
         }
-        return { has_cursor: false, tail_cursor: null, head_cursor: null, total_items: 0 };
+        if (s.includes('昨天') || s.includes('Yesterday')) {
+            const y = new Date(today.getTime() - 24 * 3600 * 1000);
+            return Math.floor(y.getTime() / 1000);
+        }
+
+        const m = s.match(/(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日/);
+        if (m) {
+            const year = m[1] ? parseInt(m[1], 10) : now.getFullYear();
+            const month = parseInt(m[2], 10) - 1;
+            const day = parseInt(m[3], 10);
+            const dt = new Date(year, month, day, 0, 0, 0, 0);
+            return Math.floor(dt.getTime() / 1000);
+        }
+
+        const weekdays = { '星期一': 1, '星期二': 2, '星期三': 3, '星期四': 4, '星期五': 5, '星期六': 6, '星期日': 0, '星期天': 0 };
+        for (const [wName, wDay] of Object.entries(weekdays)) {
+            if (s.includes(wName)) {
+                const currentDay = now.getDay();
+                let diff = (currentDay - wDay + 7) % 7;
+                if (diff === 0) diff = 7;
+                const dt = new Date(today.getTime() - diff * 24 * 3600 * 1000);
+                return Math.floor(dt.getTime() / 1000);
+            }
+        }
+
+        return Math.floor((today.getTime() - 60 * 24 * 3600 * 1000) / 1000);
     }
 
     function parseDuration(str) {
@@ -282,23 +318,26 @@
         return 0;
     }
 
-    // ─── 4. 扫描页面当前所有卡片 ───
-    function scanAllRenderedCards() {
+    // ─── 4. 核心算法：组内倒序生成 seq，计算全局唯一绝对 ts_id ───
+    function extractAllCardsWithTsId() {
         const sections = Array.from(document.querySelectorAll('ytd-item-section-renderer'));
-        const results = [];
-        const seen = new Set();
+        const allItems = [];
+        const seenVids = new Set();
 
         sections.forEach(sec => {
             const headerEl = sec.querySelector('#header, #title, #header-text, h2');
             let dateLabel = headerEl ? headerEl.textContent.trim() : '';
             if (!dateLabel || dateLabel === 'Shorts') dateLabel = '未知日期';
 
-            const cards = sec.querySelectorAll('yt-lockup-view-model, ytd-video-renderer, ytm-shorts-lockup-view-model, ytd-reel-item-renderer, yt-shorts-lockup-view-model');
+            const midnightTs = parseDateToMidnightTs(dateLabel);
+
+            // 查找该 section 下的所有卡片
+            const cards = Array.from(sec.querySelectorAll('yt-lockup-view-model, ytd-video-renderer, ytm-shorts-lockup-view-model, ytd-reel-item-renderer, yt-shorts-lockup-view-model'));
+            const validCardsInSec = [];
 
             cards.forEach(card => {
                 const watchLink = card.querySelector('a[href*="/watch?v="]');
                 const shortsLink = card.querySelector('a[href*="/shorts/"]');
-
                 let videoId = null;
                 let isShort = false;
                 let link = null;
@@ -311,8 +350,24 @@
                     if (m) { videoId = m[1]; isShort = true; link = shortsLink; }
                 }
 
-                if (!videoId || seen.has(videoId)) return;
-                seen.add(videoId);
+                if (!videoId || seenVids.has(videoId)) return;
+                seenVids.add(videoId);
+
+                validCardsInSec.push({ card, videoId, isShort, link });
+            });
+
+            // 核心设计：组内共有 n 个视频，页面自上而下顺序的“倒序”编号 001, 002, 003...
+            // 最底端最早看的: seq = 1
+            // 最顶端最晚看的: seq = n
+            const n = validCardsInSec.length;
+            validCardsInSec.forEach((itemObj, idxFromTop) => {
+                const seq = n - idxFromTop; // 1 <= seq <= n
+                const ts_id = midnightTs * 1000 + seq;
+
+                const card = itemObj.card;
+                const videoId = itemObj.videoId;
+                const isShort = itemObj.isShort;
+                const link = itemObj.link;
 
                 let title = '';
                 const titleEl = card.querySelector('h3, #video-title, .yt-core-attributed-string');
@@ -349,7 +404,9 @@
                     }
                 }
 
-                results.push({
+                allItems.push({
+                    ts_id,
+                    seq_num: seq,
                     videoId,
                     title: title.slice(0, 150),
                     channel: channel || (isShort ? 'YouTube Shorts' : 'YouTube'),
@@ -362,58 +419,18 @@
             });
         });
 
-        return results;
+        return allItems;
     }
 
-    // ─── 5. 核心算法：双游标自动推算 (切分出尾部追加与头部插入批次) ───
-    function partitionCardsByCursors(allCards, tailCursorId, headCursorId) {
-        if (!tailCursorId && !headCursorId) {
-            // 空库状态：全部作为初始尾部追加
-            return {
-                tailAppend: allCards,
-                headPrepend: []
-            };
-        }
-
-        const tailAppend = [];
-        const headPrepend = [];
-        let state = tailCursorId ? 'BEFORE_TAIL' : 'IN_MIDDLE';
-
-        for (const card of allCards) {
-            const vid = card.videoId;
-
-            if (state === 'BEFORE_TAIL') {
-                if (vid === tailCursorId) {
-                    // 遇到最新分界线：结束尾部追加批次，进入已有区间
-                    state = headCursorId ? 'IN_MIDDLE' : 'DONE';
-                    continue;
-                }
-                tailAppend.push(card);
-            } else if (state === 'IN_MIDDLE') {
-                if (vid === headCursorId) {
-                    // 遇到最老分界线：结束已有区间，进入更早历史回溯区间
-                    state = 'AFTER_HEAD';
-                    continue;
-                }
-                // 处于已同步区间，忽略
-            } else if (state === 'AFTER_HEAD') {
-                // 比最老分界线更早的历史：归入头部插入批次
-                headPrepend.push(card);
-            }
-        }
-
-        return { tailAppend, headPrepend };
-    }
-
-    // ─── 6. 智能同步执行器 ───
-    async function doSmartSync(mode = 'auto') {
+    // ─── 5. 基于 Range 的差量探测与智能同步 ───
+    async function doSmartSync() {
         if (syncing) return;
         syncing = true;
         const syncBtn = document.getElementById('chSyncBtn');
         const statusEl = document.getElementById('chStatus');
 
         if (syncBtn) syncBtn.disabled = true;
-        if (statusEl) statusEl.textContent = 'CyberHistory: 获取双游标...';
+        if (statusEl) statusEl.textContent = 'CyberHistory: 获取已入库范围...';
 
         const online = await checkHealth();
         if (!online) {
@@ -423,56 +440,65 @@
         }
 
         try {
-            // 步骤 1: 获取双游标
-            const cursorData = await fetchDualCursors();
-            const tailId = cursorData.tail_cursor ? cursorData.tail_cursor.source_id : null;
-            const headId = cursorData.head_cursor ? cursorData.head_cursor.source_id : null;
+            // 步骤 1: 获取服务端已有的 ts_id 范围
+            const rangeRes = await fetch(`${API_BASE}/api/sync/range`);
+            const rangeData = await rangeRes.json();
 
-            // 步骤 2: 扫描当前展开的所有卡片
-            if (statusEl) statusEl.textContent = 'CyberHistory: 扫描页面卡片...';
-            const allCards = scanAllRenderedCards();
+            // 步骤 2: 扫描当前展开的所有卡片并计算绝对 ts_id
+            if (statusEl) statusEl.textContent = 'CyberHistory: 计算 ts-id...';
+            const allItems = extractAllCardsWithTsId();
 
-            // 步骤 3: 自动推算分区
-            const { tailAppend, headPrepend } = partitionCardsByCursors(allCards, tailId, headId);
+            let toInsert = [];
+            let tailCount = 0;
+            let headCount = 0;
 
-            let appendCount = 0;
-            let prependCount = 0;
+            if (!rangeData.has_data) {
+                toInsert = allItems;
+                tailCount = allItems.length;
+            } else {
+                const maxTsId = rangeData.max_ts_id;
+                const minTsId = rangeData.min_ts_id;
 
-            // 执行尾部追加 (新视频，倒序为较旧->最新提交)
-            if (tailAppend.length > 0 && mode !== 'head_only') {
-                if (statusEl) statusEl.textContent = `CyberHistory: 追加最新 ${tailAppend.length} 条...`;
-                const toAppend = tailAppend.reverse();
-                const resp = await fetch(`${API_BASE}/api/sync/youtube?direction=tail_append`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ items: toAppend })
-                });
-                const r = await resp.json();
-                appendCount = r.inserted || toAppend.length;
+                // 核心设计：基于 range 判定哪些记录是未入库的
+                // 1. 尾部追加项 (比已入库最新的还新)
+                const tailItems = allItems.filter(i => i.ts_id > maxTsId);
+                // 2. 头部插入项 (比已入库最老的还老)
+                const headItems = allItems.filter(i => i.ts_id < minTsId);
+
+                tailCount = tailItems.length;
+                headCount = headItems.length;
+                toInsert = [...headItems, ...tailItems];
             }
 
-            // 执行头部回溯插入 (更深历史，保持自上而下较近过去->更深过去提交)
-            if (headPrepend.length > 0 && mode !== 'tail_only') {
-                if (statusEl) statusEl.textContent = `CyberHistory: 插入历史 ${headPrepend.length} 条...`;
-                const resp = await fetch(`${API_BASE}/api/sync/youtube?direction=head_prepend`, {
+            if (toInsert.length === 0) {
+                const nextTime = new Date(Date.now() + SYNC_INTERVAL_MS).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+                if (statusEl) statusEl.textContent = `CyberHistory: 已是最新 (无未入库记录) | 下次: ${nextTime}`;
+                syncing = false;
+                if (syncBtn) syncBtn.disabled = false;
+                return;
+            }
+
+            // 按 ts_id 递增顺序排序入库 (时间由旧至新自然追加)
+            toInsert.sort((a, b) => a.ts_id - b.ts_id);
+
+            if (statusEl) statusEl.textContent = `CyberHistory: 入库中 (新追加${tailCount}, 历史${headCount})...`;
+
+            // 分批上报 (每批 200 条，防止超大包超时)
+            let totalInserted = 0;
+            const batchSize = 200;
+            for (let i = 0; i < toInsert.length; i += batchSize) {
+                const batch = toInsert.slice(i, i + batchSize);
+                const resp = await fetch(`${API_BASE}/api/sync/youtube`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ items: headPrepend })
+                    body: JSON.stringify({ items: batch })
                 });
                 const r = await resp.json();
-                prependCount = r.inserted || headPrepend.length;
+                totalInserted += (r.inserted || 0);
             }
 
             const nextTime = new Date(Date.now() + SYNC_INTERVAL_MS).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-
-            if (appendCount === 0 && prependCount === 0) {
-                if (statusEl) statusEl.textContent = `CyberHistory: 已是最新 (无未同步项) | 下次: ${nextTime}`;
-            } else {
-                let msg = '已同步: ';
-                if (appendCount > 0) msg += `追加最新${appendCount}条 `;
-                if (prependCount > 0) msg += `插入历史${prependCount}条 `;
-                if (statusEl) statusEl.textContent = `CyberHistory: ${msg}| 下次: ${nextTime}`;
-            }
+            if (statusEl) statusEl.textContent = `CyberHistory: 入库完成 ${totalInserted} 条 (尾部+${tailCount}, 头部+${headCount}) | 下次: ${nextTime}`;
         } catch (err) {
             if (statusEl) statusEl.textContent = `CyberHistory: 同步异常 (${err.message})`;
         }
@@ -481,20 +507,13 @@
         if (syncBtn) syncBtn.disabled = false;
     }
 
-    // ─── 7. 回溯滚动同步处理器 ───
-    async function handleBacktrackSync() {
+    // ─── 6. 深度回溯滚动与同步处理器 ───
+    async function handleDeepBacktrackSync() {
         const modal = document.getElementById('ch-op-modal');
         if (modal) modal.classList.remove('show');
 
         const select = document.getElementById('selectBacktrackTarget');
-        const targetVal = select ? select.value : '60';
-
-        if (targetVal === 'current') {
-            doSmartSync('auto');
-            return;
-        }
-
-        const maxScrolls = parseInt(targetVal, 10) || 60;
+        const maxScrolls = parseInt(select ? select.value : '60', 10) || 60;
         const statusEl = document.getElementById('chStatus');
         const stopBtn = document.getElementById('btnStopScroll');
 
@@ -506,23 +525,22 @@
             scrollCount++;
             if (statusEl) statusEl.textContent = `CyberHistory: 回溯滚动中 (${scrollCount}/${maxScrolls})...`;
             window.scrollTo(0, document.documentElement.scrollHeight);
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise(r => setTimeout(r, 2200));
         }
 
         if (stopBtn) stopBtn.style.display = 'none';
         autoScrolling = false;
 
-        // 滚动完成后自动执行双向同步入库
-        doSmartSync('auto');
+        // 滚动完成后自动执行基于 ts-id range 的差量入库
+        doSmartSync();
     }
 
-    // 挂载全局对象供外部探测
     window.__cyberHistorySync = doSmartSync;
-    window.__partitionCardsByCursors = partitionCardsByCursors;
+    window.__extractAllCardsWithTsId = extractAllCardsWithTsId;
 
     // ─── 初始化与心跳 ───
     injectUI();
-    setTimeout(() => doSmartSync('auto'), 2000);
-    setInterval(() => doSmartSync('auto'), SYNC_INTERVAL_MS);
+    setTimeout(() => doSmartSync(), 2500);
+    setInterval(() => doSmartSync(), SYNC_INTERVAL_MS);
     checkHealth();
 })();

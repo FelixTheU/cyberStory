@@ -15,10 +15,10 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
-    # 1. 核心条目表 (Append-Only 流水日志，严格只添加不插值)
+    # 1. 核心条目表 (主键为 ts_id: 时间戳秒数 * 1000 + 3位组内倒序seq)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_id INTEGER PRIMARY KEY,
         source TEXT NOT NULL DEFAULT 'youtube',
         source_id TEXT NOT NULL,
         title TEXT NOT NULL,
@@ -38,18 +38,10 @@ def init_db():
     );
     """)
 
-    # 尝试补充新增列 (兼容已创建的数据库)
-    for col_def in [
-        ("progress_pct", "INTEGER DEFAULT 0"),
-        ("cost_time_sec", "REAL DEFAULT 0"),
-        ("current_step", "TEXT")
-    ]:
-        try:
-            cursor.execute(f"ALTER TABLE items ADD COLUMN {col_def[0]} {col_def[1]};")
-        except Exception:
-            pass
+    # 索引
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_items_source_sid ON items(source, source_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);")
 
-    
     # 2. 字幕分段表
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS video_subtitles (
@@ -58,7 +50,7 @@ def init_db():
         start_sec REAL NOT NULL,
         end_sec REAL NOT NULL,
         text TEXT NOT NULL,
-        FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
+        FOREIGN KEY(item_id) REFERENCES items(ts_id) ON DELETE CASCADE
     );
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_video_subtitles_item ON video_subtitles(item_id);")
@@ -85,75 +77,56 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_dual_cursors() -> Dict[str, Any]:
-    """获取当前历史记录表的最老游标 (head_cursor，用于向过去回溯) 与最新游标 (tail_cursor，用于常规向未来追加)"""
+def get_ts_range() -> Dict[str, Any]:
+    """获取服务端已入库历史记录的 ts_id 范围 (min_ts_id 与 max_ts_id)"""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT min(id), max(id), count(*) FROM items;")
-    min_id, max_id, count = cursor.fetchone()
+    cursor.execute("SELECT min(ts_id), max(ts_id), count(*) FROM items;")
+    min_ts, max_ts, count = cursor.fetchone()
     
-    if not count:
+    if not count or min_ts is None:
         conn.close()
-        return {"has_cursor": False, "head_cursor": None, "tail_cursor": None, "total_items": 0}
+        return {"has_data": False, "min_ts_id": None, "max_ts_id": None, "total": 0}
         
-    cursor.execute("SELECT id, source_id, title, watched_at, created_at FROM items WHERE id = ?;", (min_id,))
-    head_row = dict(cursor.fetchone())
+    cursor.execute("SELECT ts_id, source_id, title, watched_at FROM items WHERE ts_id = ?;", (min_ts,))
+    min_row = dict(cursor.fetchone())
     
-    cursor.execute("SELECT id, source_id, title, watched_at, created_at FROM items WHERE id = ?;", (max_id,))
-    tail_row = dict(cursor.fetchone())
+    cursor.execute("SELECT ts_id, source_id, title, watched_at FROM items WHERE ts_id = ?;", (max_ts,))
+    max_row = dict(cursor.fetchone())
     
     conn.close()
     return {
-        "has_cursor": True,
-        "head_cursor": head_row, # 最老的一条 (向过去回溯半年前/一年前时的分界线)
-        "tail_cursor": tail_row, # 最新的一条 (常规同步明天/后天时的分界线)
-        "total_items": count
+        "has_data": True,
+        "min_ts_id": min_ts,
+        "max_ts_id": max_ts,
+        "min_item": min_row,
+        "max_item": max_row,
+        "total": count
     }
 
-def get_latest_cursor() -> Optional[Dict[str, Any]]:
-    """向后兼容：获取历史记录表中最后一条记录 (即 tail_cursor 最新观看记录) 作为常规追加分界线"""
-    cursors = get_dual_cursors()
-    return cursors.get("tail_cursor")
-
-def insert_items(items_data: List[Dict[str, Any]], direction: str = "tail_append") -> Dict[str, int]:
+def insert_items(items_data: List[Dict[str, Any]]) -> Dict[str, int]:
     """
-    双向增量日志写入 (Append-Only / Prepend-Only):
-    - direction == "tail_append": 常规同步，向未来产生的新视频在表尾追加 (分配 id > max_id)
-    - direction == "head_prepend": 深度同步，向过去回溯半年/一年前的历史视频在表头插入 (分配 id < min_id)
-    初始基准 ID 从 1,000,000 起始，向过去预留 100 万个历史坑位，向未来无限递增。
-    如果视频此前已转写过字幕，自动复用已有字幕，不重复耗费 CPU。
+    添加历史记录：
+    油猴脚本已计算好唯一的 ts_id (时间戳秒 * 1000 + 3位组内倒序 seq)。
+    无论常规增量还是回溯历史，服务端按顺序执行插入入库。
+    若同源视频此前已就绪过字幕，自动复用已有字幕分段，避免重复 ASR 耗费 CPU。
     """
     if not items_data:
-        return {"inserted": 0, "updated": 0}
+        return {"inserted": 0, "ignored": 0}
         
     conn = get_connection()
     cursor = conn.cursor()
     inserted = 0
-    
-    cursor.execute("SELECT min(id), max(id), count(*) FROM items;")
-    curr_min_id, curr_max_id, count = cursor.fetchone()
-    
-    if not count:
-        curr_min_id = 1000000
-        curr_max_id = 1000000
-        
-    if direction == "head_prepend":
-        # 头部回溯插入：items_data 在页面上自上而下 (较近过去 -> 更深过去)
-        # 按时间发生顺序，更深过去的应先获得较小的 id，较近过去的获得贴近 min_id 的 id
-        # 例如 K 条数据：最老分配 (min_id - K)，次老分配 (min_id - K + 1)...
-        total_k = len(items_data)
-        ordered_items = list(reversed(items_data)) # 反转为从更深过去到较近过去
-        next_id_start = (curr_min_id - total_k)
-    else:
-        # 尾部常规追加：items_data 传入时已反转为正序 (较旧在前、最新在后)
-        ordered_items = items_data
-        next_id_start = curr_max_id + 1
+    ignored = 0
 
-    for idx, item in enumerate(ordered_items):
+    for item in items_data:
+        ts_id = item.get("ts_id")
         source = item.get("source", "youtube")
         source_id = item.get("videoId") or item.get("source_id")
-        if not source_id:
+        if not ts_id or not source_id:
             continue
+            
+        ts_id = int(ts_id)
         title = item.get("title", "")
         author = item.get("channel") or item.get("author", "")
         url = item.get("url") or f"https://www.youtube.com/watch?v={source_id}"
@@ -161,14 +134,12 @@ def insert_items(items_data: List[Dict[str, Any]], direction: str = "tail_append
         thumbnail_url = item.get("thumbnail") or item.get("thumbnail_url") or f"https://i.ytimg.com/vi/{source_id}/hqdefault.jpg"
         watched_at = item.get("watchedDate") or item.get("watched_at", "")
         
-        assigned_id = next_id_start + idx
-        
         # 检查之前是否已经处理就绪过同源视频 (复用字幕)
         cursor.execute("""
-        SELECT id, sub_source, cost_time_sec 
+        SELECT ts_id, sub_source, cost_time_sec 
         FROM items 
         WHERE source = ? AND source_id = ? AND status = 'ready'
-        ORDER BY id DESC LIMIT 1;
+        ORDER BY ts_id DESC LIMIT 1;
         """, (source, source_id))
         prev_ready = cursor.fetchone()
         
@@ -178,49 +149,54 @@ def insert_items(items_data: List[Dict[str, Any]], direction: str = "tail_append
         step_text = '已完成 (复用)' if prev_ready else None
         progress = 100 if prev_ready else 0
 
-        cursor.execute("""
-        INSERT INTO items (id, source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, status, sub_source, progress_pct, cost_time_sec, current_step)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        """, (assigned_id, source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, initial_status, sub_source, progress, cost_time, step_text))
-        
-        inserted += 1
-        
-        # 若之前有已完成的字幕，直接把字幕分段关联/复制一份到新 assigned_id
-        if prev_ready:
-            old_item_id = prev_ready["id"]
+        try:
             cursor.execute("""
-            INSERT INTO video_subtitles (item_id, start_sec, end_sec, text)
-            SELECT ?, start_sec, end_sec, text
-            FROM video_subtitles WHERE item_id = ?;
-            """, (assigned_id, old_item_id))
+            INSERT INTO items (ts_id, source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, status, sub_source, progress_pct, cost_time_sec, current_step)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ts_id) DO UPDATE SET
+                title = CASE WHEN items.title = '' THEN excluded.title ELSE items.title END,
+                author = CASE WHEN items.author = '' THEN excluded.author ELSE items.author END,
+                watched_at = excluded.watched_at,
+                updated_at = CURRENT_TIMESTAMP;
+            """, (ts_id, source, source_id, title, author, url, duration_sec, thumbnail_url, watched_at, initial_status, sub_source, progress, cost_time, step_text))
             
-            cursor.execute("""
-            INSERT INTO subtitles_fts (item_id, title, author, content)
-            SELECT ?, title, author, content
-            FROM subtitles_fts WHERE item_id = ?;
-            """, (assigned_id, old_item_id))
-
-    # 更新 sqlite 自增游标
-    cursor.execute("SELECT max(id) FROM items;")
-    new_max = cursor.fetchone()[0]
-    cursor.execute("DELETE FROM sqlite_sequence WHERE name='items';")
-    cursor.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('items', ?);", (new_max,))
+            if cursor.rowcount > 0:
+                inserted += 1
+                
+                # 若之前有已完成的字幕，直接把字幕分段关联/复制一份到新 ts_id
+                if prev_ready:
+                    old_ts_id = prev_ready["ts_id"]
+                    cursor.execute("""
+                    INSERT INTO video_subtitles (item_id, start_sec, end_sec, text)
+                    SELECT ?, start_sec, end_sec, text
+                    FROM video_subtitles WHERE item_id = ?;
+                    """, (ts_id, old_ts_id))
+                    
+                    cursor.execute("""
+                    INSERT INTO subtitles_fts (item_id, title, author, content)
+                    SELECT ?, title, author, content
+                    FROM subtitles_fts WHERE item_id = ?;
+                    """, (ts_id, old_ts_id))
+            else:
+                ignored += 1
+        except Exception:
+            ignored += 1
 
     conn.commit()
     conn.close()
-    return {"inserted": inserted, "updated": 0}
+    return {"inserted": inserted, "ignored": ignored}
 
 def get_next_pending_item() -> Optional[Dict[str, Any]]:
     conn = get_connection()
     cursor = conn.cursor()
     # 采用短作业优先 (SJF) 调度策略：短视频优先处理，避免超长视频阻塞队列
     cursor.execute("""
-    SELECT id, source, source_id, title, author, url, duration_sec
+    SELECT ts_id, ts_id AS id, source, source_id, title, author, url, duration_sec
     FROM items
     WHERE status = 'pending'
     ORDER BY 
         CASE WHEN duration_sec <= 0 THEN 999999 ELSE duration_sec END ASC,
-        id ASC
+        ts_id DESC
     LIMIT 1;
     """)
     row = cursor.fetchone()
@@ -239,7 +215,7 @@ def update_item_status(item_id: int, status: str, error_message: Optional[str] =
         cost_time_sec = COALESCE(?, cost_time_sec),
         current_step = COALESCE(?, current_step),
         updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?;
+    WHERE ts_id = ?;
     """, (status, error_message, sub_source, progress_pct, cost_time_sec, current_step, item_id))
     conn.commit()
     conn.close()
@@ -270,7 +246,7 @@ def save_subtitles_and_index(item_id: int, segments: List[Dict[str, Any]], sub_s
     full_content = " ".join(full_text_parts)
     
     # 获取标题和作者
-    cursor.execute("SELECT title, author FROM items WHERE id = ?;", (item_id,))
+    cursor.execute("SELECT title, author FROM items WHERE ts_id = ?;", (item_id,))
     row = cursor.fetchone()
     title = row["title"] if row else ""
     author = row["author"] if row else ""
@@ -291,7 +267,7 @@ def save_subtitles_and_index(item_id: int, segments: List[Dict[str, Any]], sub_s
         cost_time_sec = ?, 
         current_step = '已完成',
         updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?;
+    WHERE ts_id = ?;
     """, (sub_source, cost_time_sec, item_id))
     
     conn.commit()
@@ -321,20 +297,18 @@ def search(query: str, page: int = 1, page_size: int = 20, source: Optional[str]
     # 若检索词 >= 3 字符，优先使用 FTS5 检索
     if len(query) >= 3:
         try:
-            # 清理 query 中非法字符
             safe_query = re.sub(r'["\'\*\^\:\(\)]', ' ', query).strip()
-            # FTS5 trigram 匹配：每个词带双引号精确切片匹配
             fts_match_expr = f'"{safe_query}"'
             
             if source_filter:
                 cursor.execute("""
                 SELECT 
-                    i.id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+                    i.ts_id, i.ts_id AS id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
                     i.thumbnail_url, i.watched_at, i.sub_source,
                     snippet(subtitles_fts, 3, '<mark>', '</mark>', '...', 18) as fts_snippet,
                     bm25(subtitles_fts) as rank
                 FROM subtitles_fts f
-                JOIN items i ON i.id = f.item_id
+                JOIN items i ON i.ts_id = f.item_id
                 WHERE subtitles_fts MATCH ? AND i.source = ?
                 ORDER BY rank ASC
                 LIMIT ? OFFSET ?;
@@ -342,12 +316,12 @@ def search(query: str, page: int = 1, page_size: int = 20, source: Optional[str]
             else:
                 cursor.execute("""
                 SELECT 
-                    i.id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+                    i.ts_id, i.ts_id AS id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
                     i.thumbnail_url, i.watched_at, i.sub_source,
                     snippet(subtitles_fts, 3, '<mark>', '</mark>', '...', 18) as fts_snippet,
                     bm25(subtitles_fts) as rank
                 FROM subtitles_fts f
-                JOIN items i ON i.id = f.item_id
+                JOIN items i ON i.ts_id = f.item_id
                 WHERE subtitles_fts MATCH ?
                 ORDER BY rank ASC
                 LIMIT ? OFFSET ?;
@@ -356,8 +330,7 @@ def search(query: str, page: int = 1, page_size: int = 20, source: Optional[str]
             rows = cursor.fetchall()
             for r in rows:
                 item_dict = dict(r)
-                # 寻找具体的命中秒数
-                item_id = item_dict["id"]
+                item_id = item_dict["ts_id"]
                 cursor.execute("""
                 SELECT start_sec, text
                 FROM video_subtitles
@@ -392,31 +365,30 @@ def search(query: str, page: int = 1, page_size: int = 20, source: Optional[str]
         like_expr = f"%{query}%"
         if source_filter:
             cursor.execute("""
-            SELECT DISTINCT i.id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+            SELECT DISTINCT i.ts_id, i.ts_id AS id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
                    i.thumbnail_url, i.watched_at, i.sub_source
             FROM items i
-            LEFT JOIN video_subtitles vs ON vs.item_id = i.id
+            LEFT JOIN video_subtitles vs ON vs.item_id = i.ts_id
             WHERE (i.title LIKE ? OR i.author LIKE ? OR vs.text LIKE ?) AND i.source = ?
-            ORDER BY i.id DESC
+            ORDER BY i.ts_id DESC
             LIMIT ? OFFSET ?;
             """, (like_expr, like_expr, like_expr, source_filter, page_size, offset))
         else:
             cursor.execute("""
-            SELECT DISTINCT i.id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+            SELECT DISTINCT i.ts_id, i.ts_id AS id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
                    i.thumbnail_url, i.watched_at, i.sub_source
             FROM items i
-            LEFT JOIN video_subtitles vs ON vs.item_id = i.id
+            LEFT JOIN video_subtitles vs ON vs.item_id = i.ts_id
             WHERE i.title LIKE ? OR i.author LIKE ? OR vs.text LIKE ?
-            ORDER BY i.id DESC
+            ORDER BY i.ts_id DESC
             LIMIT ? OFFSET ?;
             """, (like_expr, like_expr, like_expr, page_size, offset))
         
         rows = cursor.fetchall()
         for r in rows:
             item_dict = dict(r)
-            item_id = item_dict["id"]
+            item_id = item_dict["ts_id"]
             
-            # 找到命中的台词片段
             cursor.execute("""
             SELECT start_sec, text
             FROM video_subtitles
@@ -472,56 +444,20 @@ def get_item_subtitles(item_id: int) -> List[Dict[str, Any]]:
     conn.close()
     return segments
 
-def parse_date_score(label: str) -> float:
-    """将人类可读日期 (如 '今天', '昨天', '10月6日', '星期一') 解析为时间戳权重，保证最新日期排在最前"""
-    if not label:
-        return 0.0
-    l = label.strip()
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    
-    if '今天' in l or 'Today' in l:
-        return now.timestamp()
-    if '昨天' in l or 'Yesterday' in l:
-        return (now - timedelta(days=1)).timestamp()
-    
-    # 匹配 "10月13日"、"9月11日"、"2026年10月13日"
-    m = re.search(r'(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日', l)
-    if m:
-        year = int(m.group(1)) if m.group(1) else now.year
-        month = int(m.group(2))
-        day = int(m.group(3))
-        try:
-            return datetime(year, month, day).timestamp()
-        except Exception:
-            return 0.0
-            
-    # 匹配 "星期X" (本周内的相对星期)
-    weekdays = {'星期一': 0, '星期二': 1, '星期三': 2, '星期四': 3, '星期五': 4, '星期六': 5, '星期日': 6, '星期天': 6}
-    for w_name, w_idx in weekdays.items():
-        if w_name in l:
-            diff = (now.weekday() - w_idx) % 7
-            if diff == 0:
-                diff = 7
-            target_date = now - timedelta(days=diff)
-            return target_date.timestamp()
-            
-    return 0.0
-
 def get_history_feed() -> List[Dict[str, Any]]:
-    """历史记录页面倒序展示历史记录表中的记录 (严格按照纯追加日志 ORDER BY id DESC)"""
+    """历史记录页面倒序展示历史记录表中的记录 (严格按照纯追加日志 ORDER BY ts_id DESC)"""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT id, source_id, title, author, url, duration_sec, thumbnail_url,
+    SELECT ts_id, ts_id AS id, source_id, title, author, url, duration_sec, thumbnail_url,
            watched_at, status, sub_source, progress_pct, cost_time_sec, current_step, error_message, updated_at,
            (strftime('%s', 'now') - strftime('%s', updated_at)) as live_elapsed_sec
     FROM items
-    ORDER BY id DESC;
+    ORDER BY ts_id DESC;
     """)
     rows = cursor.fetchall()
     
-    # 按倒序遍历到的先后顺序自然组织日期分组与组内条目 (最新观看永远在最顶部)
+    # 按 ts_id DESC 倒序遍历到的先后顺序自然组织日期分组与组内条目 (最新观看永远在最顶部)
     groups_map = {}
     ordered_groups = []
     
@@ -529,7 +465,6 @@ def get_history_feed() -> List[Dict[str, Any]]:
         d = dict(r)
         d["duration_str"] = _format_time(d["duration_sec"]) if d["duration_sec"] else "00:00"
         
-        # 格式化耗时
         cost_sec = d.get("cost_time_sec") or 0.0
         if d.get("status") == "processing" and cost_sec <= 0:
             cost_sec = float(d.get("live_elapsed_sec") or 0.0)
