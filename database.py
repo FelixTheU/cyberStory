@@ -75,6 +75,13 @@ def init_db():
         tokenize = 'trigram'
     );
     """)
+
+    # 服务重启时，将异常中断的 processing 状态重置回 pending
+    cursor.execute("""
+    UPDATE items
+    SET status = 'pending', current_step = NULL, progress_pct = 0
+    WHERE status = 'processing';
+    """)
     
     conn.commit()
     conn.close()
