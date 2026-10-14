@@ -143,7 +143,7 @@ def parse_vtt(vtt_path: Path) -> List[Dict[str, Any]]:
 
 
 def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[List[Dict[str, Any]]]:
-    """使用 faster-whisper 进行本地 ASR 转写 (含 CPU 限流、长视频限额截取与 VAD 加速)"""
+    """使用 faster-whisper 进行本地 ASR 转写 (完整音频转录，保留 CPU 限流与 VAD 加速)"""
     audio_dir = config.TEMP_DIR / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
@@ -156,8 +156,7 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
     except Exception:
         pass
 
-    # 2. 长视频截断：只下载前 MAX_ASR_DURATION_SEC (默认45分钟) 的音频切片，节约带宽与时间
-    max_asr_sec = getattr(config, "MAX_ASR_DURATION_SEC", 2700)
+    # 2. 完整音频下载：不截断，拉取全长音频
     audio_path = audio_dir / f"{video_id}.opus"
     cmd = [
         "yt-dlp",
@@ -165,19 +164,13 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
         "-o", str(audio_path),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
-    if max_asr_sec > 0:
-        h = max_asr_sec // 3600
-        m = (max_asr_sec % 3600) // 60
-        s = max_asr_sec % 60
-        section_str = f"*00:00:00-{h:02d}:{m:02d}:{s:02d}"
-        cmd.extend(["--download-sections", section_str])
 
     if config.PROXY_URL:
         cmd.insert(1, "--proxy")
         cmd.insert(2, config.PROXY_URL)
 
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except Exception as e:
         logger.warning(f"Audio download failed for {video_id}: {e}")
         return None
@@ -218,16 +211,9 @@ def try_asr_transcribe(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opti
 
         segments = []
         total_duration = info.duration if hasattr(info, 'duration') and info.duration else 0
-        if max_asr_sec > 0 and total_duration > max_asr_sec:
-            total_duration = max_asr_sec
-
         last_progress_update = time.time()
 
         for seg in segments_gen:
-            # 严格控制识别上限，避免超长视频长时间占用算力
-            if max_asr_sec > 0 and seg.start >= max_asr_sec:
-                break
-
             segments.append({
                 "start": seg.start,
                 "end": seg.end,

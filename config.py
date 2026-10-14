@@ -26,6 +26,6 @@ WHISPER_DEVICE = os.environ.get("CYBER_WHISPER_DEVICE", "cpu")  # "cuda" 或 "cp
 WHISPER_COMPUTE_TYPE = "int8" if WHISPER_DEVICE == "cpu" else "float16"
 # CPU 线程严格约束 (默认 2 线程，避免打满宿主机 CPU)
 WHISPER_CPU_THREADS = int(os.environ.get("CYBER_WHISPER_THREADS", "2"))
-# 单视频最大 ASR 识别时长限制 (秒，默认 45 分钟，防止超长视频无限占用)
-MAX_ASR_DURATION_SEC = int(os.environ.get("CYBER_MAX_ASR_SEC", "2700"))
+# 0 表示取消长视频截断，转录完整全长音频
+MAX_ASR_DURATION_SEC = 0
 
