@@ -1,64 +1,264 @@
 /**
  * cyberstory 前端交互逻辑
- * 支持三栏联动：A区(历史流) -> B区(全文搜索) -> C区(台词时间轴)
+ * 模块结构：
+ * 1. 视图 Tab 切换与移动端响应式交互
+ * 2. 全局搜索 (支持数据源切换、关键词检索、上下文台词联动)
+ * 3. YouTube 历史流水 (日期分组、进度耗时透明、点击展开字幕)
+ * 4. 时间轴字幕渲染、直达播放与二次过滤
  */
 
 const API_BASE = '';
 
-let currentActiveItemId = null;
-let currentSubtitles = [];
-let allHistoryItems = [];
+// 全局运行时状态
+let currentTab = 'search';
+let searchActiveItemId = null;
+let ytActiveItemId = null;
+let searchSubtitlesCache = [];
+let ytSubtitlesCache = [];
 
 document.addEventListener('DOMContentLoaded', () => {
-    initService();
-    initSearch();
-    initSubFilter();
-    loadHistoryFeed();
-    setInterval(loadHistoryFeed, 10000); // 10秒定时刷新状态与进度
+    initServiceStatus();
+    initSearchEvents();
+    initFilterEvents();
+    loadYtHistory();
+    // 10秒定时同步状态与耗时
+    setInterval(loadYtHistory, 10000);
 });
 
-// ─── 1. 初始化服务与状态 ───
-async function initService() {
+// ─── 1. 服务状态与统计 ───
+async function initServiceStatus() {
     try {
         const res = await fetch(`${API_BASE}/api/status`);
         if (res.ok) {
             const data = await res.json();
-            document.getElementById('serviceDot').style.background = '#22c55e';
-            document.getElementById('serviceStatusText').textContent = '本地服务运行中 (:8765)';
-            document.getElementById('navBadgeCount').textContent = data.total_videos || '0';
+            const dot = document.getElementById('serviceDot');
+            const statusText = document.getElementById('serviceStatusText');
+            const ytBadge = document.getElementById('navYtCount');
+
+            if (dot) dot.style.background = '#22c55e';
+            if (statusText) statusText.textContent = '本地服务运行中 (:8765)';
+            if (ytBadge) ytBadge.textContent = data.total_videos || '0';
         }
     } catch (e) {
-        document.getElementById('serviceDot').style.background = '#ef4444';
-        document.getElementById('serviceStatusText').textContent = '服务离线或异常';
+        const dot = document.getElementById('serviceDot');
+        const statusText = document.getElementById('serviceStatusText');
+        if (dot) dot.style.background = '#ef4444';
+        if (statusText) statusText.textContent = '服务离线或异常';
     }
 }
 
-// ─── 2. 加载 A 区历史流水 (按日期分组) ───
-async function loadHistoryFeed() {
+// ─── 2. 视图 Tab 切换 ───
+function switchMainTab(tabId) {
+    currentTab = tabId;
+    const tabs = ['search', 'youtube', 'zhihu'];
+
+    // 桌面侧边栏
+    tabs.forEach(t => {
+        const navEl = document.getElementById(`tab-nav-${t}`);
+        if (navEl) navEl.classList.toggle('active', t === tabId);
+    });
+
+    // 移动端底部导航
+    tabs.forEach(t => {
+        const bnavEl = document.getElementById(`bnav-${t}`);
+        if (bnavEl) bnavEl.classList.toggle('active', t === tabId);
+    });
+
+    // 视图显示
+    tabs.forEach(t => {
+        const viewEl = document.getElementById(`view-${t}`);
+        if (viewEl) viewEl.classList.toggle('active', t === tabId);
+    });
+
+    // 关闭任何移动端抽屉
+    closeMobileDetail('searchDetailPane');
+    closeMobileDetail('ytDetailPane');
+}
+
+function openMobileDetail(paneId) {
+    if (window.innerWidth <= 768) {
+        const pane = document.getElementById(paneId);
+        if (pane) pane.classList.add('mobile-open');
+    }
+}
+
+function closeMobileDetail(paneId) {
+    const pane = document.getElementById(paneId);
+    if (pane) pane.classList.remove('mobile-open');
+}
+
+// ─── 3. 全局搜索模块 ───
+function initSearchEvents() {
+    const input = document.getElementById('searchInput');
+    if (input) {
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') doSearch();
+        });
+    }
+}
+
+async function doSearch() {
+    const input = document.getElementById('searchInput');
+    const q = input ? input.value.trim() : '';
+    const sourceSelect = document.getElementById('searchSourceSelect');
+    const source = sourceSelect ? sourceSelect.value : 'all';
+
+    const resultsContainer = document.getElementById('searchResults');
+    const statsText = document.getElementById('searchResultStats');
+    const timeCostText = document.getElementById('searchTimeCost');
+
+    if (!q) {
+        resultsContainer.innerHTML = '<div class="empty-hint">请输入关键词开始检索，点击卡片可在右侧查看上下文台词</div>';
+        statsText.textContent = '请输入关键词搜索台词与内容';
+        timeCostText.textContent = '';
+        return;
+    }
+
+    statsText.textContent = `正在检索 "${escapeHtml(q)}"...`;
+    timeCostText.textContent = '';
+    resultsContainer.innerHTML = '<div class="empty-hint">正在搜索全文索引 (FTS5)...</div>';
+
+    const t0 = performance.now();
+    try {
+        const res = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}&source=${encodeURIComponent(source)}`);
+        const elapsed = Math.round(performance.now() - t0);
+        if (!res.ok) throw new Error('Search failed');
+        const data = await res.json();
+
+        const sourceLabel = source === 'youtube' ? 'YouTube' : (source === 'zhihu' ? '知乎' : '全部');
+        statsText.textContent = `[${sourceLabel}] 命中 ${data.total} 条记录`;
+        timeCostText.textContent = `耗时 ${elapsed}ms`;
+
+        renderSearchResults(data.items, q);
+    } catch (e) {
+        console.error('Search error', e);
+        resultsContainer.innerHTML = '<div class="empty-hint">搜索失败，请检查服务连接</div>';
+    }
+}
+
+function renderSearchResults(items, keyword) {
+    const container = document.getElementById('searchResults');
+    if (!items || items.length === 0) {
+        container.innerHTML = '<div class="empty-hint">未检索到匹配的台词或内容</div>';
+        return;
+    }
+
+    let html = '';
+    items.forEach((item, idx) => {
+        const isFirst = idx === 0;
+        const durationStr = formatSeconds(item.duration_sec);
+        const sourceClass = item.source === 'zhihu' ? 'zhihu' : 'yt';
+        const sourceName = item.source === 'zhihu' ? '知乎' : 'YouTube';
+
+        html += `
+            <div class="result-card ${isFirst ? 'active' : ''}" id="search-card-${item.id}" onclick="selectSearchResultItem(${item.id}, ${item.start_sec || 0}, '${escapeHtml(keyword)}')">
+                <div class="result-top">
+                    <div class="result-thumb">
+                        <img src="${escapeHtml(item.thumbnail_url)}" alt="thumb" loading="lazy" onerror="this.src='https://placehold.co/120x68?text=Video'">
+                        <span class="result-duration">${escapeHtml(durationStr)}</span>
+                    </div>
+                    <div class="result-info">
+                        <div class="result-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+                        <div class="result-meta">
+                            <span class="source-tag ${sourceClass}">${sourceName}</span>
+                            <span>${escapeHtml(item.author || '')}</span>
+                            <span>•</span>
+                            <span>${escapeHtml(item.watched_at || '')}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="result-snippet">
+                    ${item.snippet || item.fts_snippet || escapeHtml(item.title)}
+                </div>
+
+                <div class="result-actions">
+                    <a href="${escapeHtml(item.jump_url)}" target="_blank" class="time-jump-link" onclick="event.stopPropagation()">
+                        ⏱ ${escapeHtml(item.time_stamp || '00:00')} (直达原片播放) ↗
+                    </a>
+                    <span style="font-size:11px; color:#2563eb; font-weight:600;">右侧查看上下文 →</span>
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+
+    // 默认高亮并展开优先选中有字幕的卡片
+    let defaultItem = items.find(i => i.sub_source === 'native' || i.sub_source === 'asr') || items[0];
+    if (defaultItem) {
+        selectSearchResultItem(defaultItem.id, defaultItem.start_sec || 0, keyword, false);
+    }
+}
+
+async function selectSearchResultItem(itemId, startSec, keyword, openMobile = true) {
+    searchActiveItemId = itemId;
+
+    // 更新卡片激活态
+    document.querySelectorAll('#searchResults .result-card').forEach(el => el.classList.remove('active'));
+    const card = document.getElementById(`search-card-${itemId}`);
+    if (card) {
+        card.classList.add('active');
+        const titleText = card.querySelector('.result-title')?.textContent || '视频详情';
+        const channelText = card.querySelector('.result-meta span:nth-child(2)')?.textContent || '';
+        document.getElementById('searchDetailTitle').textContent = titleText;
+        document.getElementById('searchDetailMeta').innerHTML = `
+            <span class="source-tag yt">YouTube</span>
+            <span>${escapeHtml(channelText)}</span>
+            <span>•</span>
+            <span id="searchSubCountMeta">加载台词中...</span>
+        `;
+    }
+
+    const stream = document.getElementById('searchTimelineStream');
+    stream.innerHTML = '<div class="empty-hint">正在读取台词时间轴...</div>';
+
+    try {
+        const res = await fetch(`${API_BASE}/api/items/${itemId}/subtitles`);
+        if (!res.ok) throw new Error('Failed to load subtitles');
+        const data = await res.json();
+        searchSubtitlesCache = data.subtitles || [];
+
+        const countEl = document.getElementById('searchSubCountMeta');
+        if (countEl) countEl.textContent = `共 ${searchSubtitlesCache.length} 条台词分段`;
+
+        renderTimelineRows(searchSubtitlesCache, 'searchTimelineStream', startSec, keyword);
+        if (openMobile) openMobileDetail('searchDetailPane');
+    } catch (e) {
+        stream.innerHTML = '<div class="empty-hint">暂无可用台词数据</div>';
+    }
+}
+
+// ─── 4. YouTube 历史记录模块 (无搜索区，双栏展示) ───
+async function loadYtHistory() {
     try {
         const res = await fetch(`${API_BASE}/api/history`);
         if (!res.ok) return;
         const groups = await res.json();
 
-        let totalCount = 0;
-        groups.forEach(g => totalCount += (g.items ? g.items.length : 0));
-        document.getElementById('historyMetaCount').textContent = `共 ${totalCount} 条`;
-        document.getElementById('navBadgeCount').textContent = totalCount;
+        let total = 0;
+        groups.forEach(g => total += (g.items ? g.items.length : 0));
+        const countMeta = document.getElementById('ytHistoryCount');
+        const navCount = document.getElementById('navYtCount');
+        if (countMeta) countMeta.textContent = `共 ${total} 条视频`;
+        if (navCount) navCount.textContent = total;
 
-        renderHistoryFeed(groups);
+        renderYtFeed(groups);
     } catch (e) {
-        console.error('Failed to load history feed', e);
+        console.error('Failed to load YouTube history', e);
     }
 }
 
-function renderHistoryFeed(groups) {
-    const feed = document.getElementById('historyFeed');
+function renderYtFeed(groups) {
+    const feed = document.getElementById('ytHistoryFeed');
     if (!groups || groups.length === 0) {
         feed.innerHTML = '<div class="empty-hint">暂无历史记录</div>';
         return;
     }
 
     let html = '';
+    let firstReadyItem = null;
+
     groups.forEach(group => {
         html += `
             <div class="date-group">
@@ -69,9 +269,10 @@ function renderHistoryFeed(groups) {
         `;
 
         group.items.forEach(item => {
-            const isActive = currentActiveItemId === item.id ? 'active' : '';
+            const isActive = ytActiveItemId === item.id ? 'active' : '';
+            if (!firstReadyItem && item.status === 'ready') firstReadyItem = item;
 
-            // 状态徽标
+            // 状态徽标与步骤耗时
             let badgeHtml = '';
             let progressHtml = '';
 
@@ -109,15 +310,17 @@ function renderHistoryFeed(groups) {
             }
 
             html += `
-                <div class="history-card ${isActive}" id="hist-card-${item.id}" onclick="selectItem(${item.id})">
-                    <div class="thumb-box">
-                        <img src="${escapeHtml(item.thumbnail_url)}" alt="thumb" loading="lazy" onerror="this.src='https://placehold.co/100x56?text=Video'">
-                        <span class="thumb-duration">${escapeHtml(item.duration_str)}</span>
+                <div class="history-card ${isActive}" id="yt-card-${item.id}" onclick="selectYtHistoryItem(${item.id})">
+                    <div class="result-thumb">
+                        <img src="${escapeHtml(item.thumbnail_url)}" alt="thumb" loading="lazy" onerror="this.src='https://placehold.co/120x68?text=Video'">
+                        <span class="result-duration">${escapeHtml(item.duration_str)}</span>
                     </div>
-                    <div class="card-info">
-                        <div class="card-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
-                        <div class="card-channel">${escapeHtml(item.author || 'YouTube')}</div>
-                        <div class="card-badges">
+                    <div class="result-info">
+                        <div class="result-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+                        <div class="result-meta">
+                            <span>${escapeHtml(item.author || 'YouTube')}</span>
+                        </div>
+                        <div style="margin-top:6px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
                             ${badgeHtml}
                         </div>
                         ${progressHtml}
@@ -130,208 +333,129 @@ function renderHistoryFeed(groups) {
     });
 
     feed.innerHTML = html;
+
+    // 初次加载若无选中项，默认选中第一条
+    if (!ytActiveItemId && firstReadyItem) {
+        selectYtHistoryItem(firstReadyItem.id, false);
+    }
 }
 
-// ─── 3. 选择卡片联动 C 区详情 ───
-async function selectItem(itemId, highlightSec = null, highlightText = '') {
-    currentActiveItemId = itemId;
+async function selectYtHistoryItem(itemId, openMobile = true) {
+    ytActiveItemId = itemId;
 
-    // 更新 A 区高亮
-    document.querySelectorAll('.history-card').forEach(el => el.classList.remove('active'));
-    const activeEl = document.getElementById(`hist-card-${itemId}`);
-    if (activeEl) activeEl.classList.add('active');
+    document.querySelectorAll('#ytHistoryFeed .history-card').forEach(el => el.classList.remove('active'));
+    const card = document.getElementById(`yt-card-${itemId}`);
+    if (card) {
+        card.classList.add('active');
+        const title = card.querySelector('.result-title')?.textContent || '视频详情';
+        const channel = card.querySelector('.result-meta span')?.textContent || '';
+        document.getElementById('ytDetailTitle').textContent = title;
+        document.getElementById('ytDetailMeta').innerHTML = `
+            <span>${escapeHtml(channel)}</span>
+            <span>•</span>
+            <span id="ytSubCountMeta">加载台词中...</span>
+        `;
+    }
 
-    // 加载 C 区
-    document.getElementById('detailTitle').textContent = '加载台词中...';
-    document.getElementById('detailMetaBar').innerHTML = '<span>获取时间轴列表...</span>';
-    document.getElementById('timelineStream').innerHTML = '<div class="empty-hint">正在读取时间轴...</div>';
+    const stream = document.getElementById('ytTimelineStream');
+    stream.innerHTML = '<div class="empty-hint">正在读取台词时间轴...</div>';
 
     try {
         const res = await fetch(`${API_BASE}/api/items/${itemId}/subtitles`);
-        if (!res.ok) {
-            document.getElementById('timelineStream').innerHTML = '<div class="empty-hint">暂无可用字幕/台词记录</div>';
-            return;
-        }
+        if (!res.ok) throw new Error('Failed to load subtitles');
         const data = await res.json();
-        currentSubtitles = data.subtitles || [];
+        ytSubtitlesCache = data.subtitles || [];
 
-        // 查找卡片元信息
-        let itemTitle = '视频详情';
-        let itemChannel = '';
-        let itemUrl = `https://www.youtube.com/watch?v=`;
+        const countEl = document.getElementById('ytSubCountMeta');
+        if (countEl) countEl.textContent = `共 ${ytSubtitlesCache.length} 条台词分段`;
 
-        const card = document.getElementById(`hist-card-${itemId}`);
-        if (card) {
-            itemTitle = card.querySelector('.card-title').textContent;
-            itemChannel = card.querySelector('.card-channel').textContent;
-        }
-
-        document.getElementById('detailTitle').textContent = itemTitle;
-        document.getElementById('detailMetaBar').innerHTML = `
-            <span>${escapeHtml(itemChannel)}</span>
-            <span>•</span>
-            <span>共 ${currentSubtitles.length} 条台词分段</span>
-        `;
-
-        renderTimeline(currentSubtitles, highlightSec, highlightText);
+        renderTimelineRows(ytSubtitlesCache, 'ytTimelineStream', null, '');
+        if (openMobile) openMobileDetail('ytDetailPane');
     } catch (e) {
-        console.error('Failed to load item subtitles', e);
-        document.getElementById('timelineStream').innerHTML = '<div class="empty-hint">读取字幕失败</div>';
+        stream.innerHTML = '<div class="empty-hint">暂无可用字幕/台词数据</div>';
     }
 }
 
-function renderTimeline(segments, highlightSec = null, highlightKeyword = '') {
-    const stream = document.getElementById('timelineStream');
+// ─── 5. 台词时间轴渲染与局部二次过滤 ───
+function renderTimelineRows(segments, containerId, highlightSec = null, keyword = '') {
+    const container = document.getElementById(containerId);
     if (!segments || segments.length === 0) {
-        stream.innerHTML = '<div class="empty-hint">该视频暂无提取的字幕分段</div>';
+        container.innerHTML = '<div class="empty-hint">该视频暂无字幕分段</div>';
         return;
     }
 
-    let html = '';
-    segments.forEach((seg, idx) => {
-        const sec = seg.start;
-        const timeStr = seg.time_str || '00:00';
-        let isHighlighted = false;
-
-        if (highlightSec !== null && Math.abs(sec - highlightSec) < 3.0) {
-            isHighlighted = true;
+    // 针对大体量长视频进行视口分段渲染优化（避免卡死浏览器）
+    let renderList = segments;
+    if (segments.length > 250) {
+        let centerIdx = 0;
+        if (highlightSec !== null) {
+            centerIdx = segments.findIndex(s => Math.abs(s.start - highlightSec) < 6.0);
+            if (centerIdx === -1) centerIdx = 0;
         }
+        const start = Math.max(0, centerIdx - 40);
+        const end = Math.min(segments.length, start + 160);
+        renderList = segments.slice(start, end);
+    }
 
+    let html = '';
+    renderList.forEach((seg, idx) => {
+        let isHigh = false;
+        if (highlightSec !== null && Math.abs(seg.start - highlightSec) < 4.0) {
+            isHigh = true;
+        }
         let lineText = escapeHtml(seg.text);
-        if (highlightKeyword && lineText.toLowerCase().includes(highlightKeyword.toLowerCase())) {
-            isHighlighted = true;
-            const reg = new RegExp(highlightKeyword, 'gi');
+        if (keyword && lineText.toLowerCase().includes(keyword.toLowerCase())) {
+            isHigh = true;
+            const reg = new RegExp(keyword, 'gi');
             lineText = lineText.replace(reg, m => `<mark style="background:#fef08a; padding:1px 3px;">${m}</mark>`);
         }
 
         html += `
-            <div class="timeline-row ${isHighlighted ? 'highlighted' : ''}" id="timeline-row-${idx}">
-                <a href="${seg.url || '#'}&t=${Math.floor(sec)}s" target="_blank" class="time-badge">${escapeHtml(timeStr)}</a>
+            <div class="timeline-row ${isHigh ? 'highlighted' : ''}" id="${containerId}-row-${idx}">
+                <span class="time-badge">${escapeHtml(seg.time_str || '00:00')}</span>
                 <div class="timeline-text">${lineText}</div>
             </div>
         `;
     });
 
-    stream.innerHTML = html;
+    container.innerHTML = html;
 
-    // 自动滚动到高亮行
-    const firstHigh = stream.querySelector('.timeline-row.highlighted');
-    if (firstHigh) {
-        firstHigh.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const highEl = container.querySelector('.timeline-row.highlighted');
+    if (highEl) {
+        highEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 }
 
-// ─── 4. B 区搜索逻辑 ───
-function initSearch() {
-    const input = document.getElementById('searchInput');
-    input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            doSearch();
+// 二次过滤输入框
+function initFilterEvents() {
+    const searchFilter = document.getElementById('searchSubFilter');
+    if (searchFilter) {
+        searchFilter.addEventListener('input', () => {
+            filterTimelineRows('searchTimelineStream', searchFilter.value.trim().toLowerCase());
+        });
+    }
+
+    const ytFilter = document.getElementById('ytSubFilter');
+    if (ytFilter) {
+        ytFilter.addEventListener('input', () => {
+            filterTimelineRows('ytTimelineStream', ytFilter.value.trim().toLowerCase());
+        });
+    }
+}
+
+function filterTimelineRows(containerId, query) {
+    const rows = document.querySelectorAll(`#${containerId} .timeline-row`);
+    rows.forEach(r => {
+        const text = r.querySelector('.timeline-text')?.textContent.toLowerCase() || '';
+        if (!query || text.includes(query)) {
+            r.style.display = 'flex';
+        } else {
+            r.style.display = 'none';
         }
     });
 }
 
-async function doSearch() {
-    const q = document.getElementById('searchInput').value.trim();
-    const resultsContainer = document.getElementById('searchResults');
-    const metaText = document.getElementById('searchMetaText');
-    const costText = document.getElementById('searchCostText');
-
-    if (!q) {
-        resultsContainer.innerHTML = '<div class="empty-hint">请输入关键词检索全文台词</div>';
-        metaText.textContent = '输入关键词检索全文台词';
-        costText.textContent = '';
-        return;
-    }
-
-    metaText.textContent = `正在检索 "${escapeHtml(q)}"...`;
-    resultsContainer.innerHTML = '<div class="empty-hint">正在搜索全文索引...</div>';
-
-    const t0 = performance.now();
-    try {
-        const res = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q)}`);
-        const elapsed = Math.round(performance.now() - t0);
-        if (!res.ok) throw new Error('Search failed');
-        const data = await res.json();
-
-        costText.textContent = `耗时 ${elapsed}ms`;
-        metaText.textContent = `关键词 "${escapeHtml(q)}" 命中 ${data.total} 条`;
-
-        renderSearchResults(data.items, q);
-    } catch (e) {
-        console.error(e);
-        resultsContainer.innerHTML = '<div class="empty-hint">搜索失败，请检查服务连接</div>';
-    }
-}
-
-function renderSearchResults(items, keyword) {
-    const container = document.getElementById('searchResults');
-    if (!items || items.length === 0) {
-        container.innerHTML = '<div class="empty-hint">未检索到匹配的视频台词</div>';
-        return;
-    }
-
-    let html = '';
-    items.forEach(item => {
-        const durationStr = formatSeconds(item.duration_sec);
-        const subBadge = item.sub_source === 'native'
-            ? '<span class="badge-tag tag-native">原生字幕</span>'
-            : (item.sub_source === 'asr' ? '<span class="badge-tag tag-asr">AI转写</span>' : '');
-
-        html += `
-            <div class="result-card" onclick="selectItem(${item.id}, ${item.start_sec || 0}, '${escapeHtml(keyword)}')">
-                <div class="result-top">
-                    <div class="thumb-box">
-                        <img src="${escapeHtml(item.thumbnail_url)}" alt="thumb" loading="lazy">
-                        <span class="thumb-duration">${escapeHtml(durationStr)}</span>
-                    </div>
-                    <div class="result-detail">
-                        <div class="result-title">${escapeHtml(item.title)}</div>
-                        <div class="result-meta">
-                            <span>📺 ${escapeHtml(item.author || 'YouTube')}</span>
-                            <span>🕐 ${escapeHtml(item.watched_at || '')}</span>
-                            ${subBadge}
-                        </div>
-                    </div>
-                </div>
-
-                <div class="snippet-box">
-                    ${item.snippet || item.fts_snippet || escapeHtml(item.title)}
-                </div>
-
-                <div class="result-actions">
-                    <a href="${escapeHtml(item.jump_url)}" target="_blank" class="time-jump-btn" onclick="event.stopPropagation();">
-                        ⏱ ${escapeHtml(item.time_stamp || '00:00')} (直达播放) ↗
-                    </a>
-                    <button class="view-detail-btn" onclick="selectItem(${item.id}, ${item.start_sec || 0}, '${escapeHtml(keyword)}'); event.stopPropagation();">
-                        👉 在右侧查看全篇字幕 (C区)
-                    </button>
-                </div>
-            </div>
-        `;
-    });
-
-    container.innerHTML = html;
-}
-
-// ─── 5. C 区字幕内部二次过滤 ───
-function initSubFilter() {
-    const filterInput = document.getElementById('subFilterInput');
-    filterInput.addEventListener('input', () => {
-        const q = filterInput.value.trim().toLowerCase();
-        const rows = document.querySelectorAll('#timelineStream .timeline-row');
-        rows.forEach(r => {
-            const text = r.querySelector('.timeline-text').textContent.toLowerCase();
-            if (!q || text.includes(q)) {
-                r.style.display = 'flex';
-            } else {
-                r.style.display = 'none';
-            }
-        });
-    });
-}
-
-// ─── 工具辅助函数 ───
+// ─── 工具函数 ───
 function escapeHtml(str) {
     if (!str) return '';
     return String(str)

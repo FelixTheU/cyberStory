@@ -214,8 +214,8 @@ def _format_time(sec: float) -> str:
         return f"{h:02d}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
 
-def search(query: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
-    """统一全文搜索支持中英文（短语及 FTS5 trigram 复合检索）"""
+def search(query: str, page: int = 1, page_size: int = 20, source: Optional[str] = None) -> Dict[str, Any]:
+    """统一全文搜索支持中英文（短语及 FTS5 trigram 复合检索），支持 source 筛选"""
     query = query.strip()
     if not query:
         return {"items": [], "total": 0, "page": page, "page_size": page_size}
@@ -225,6 +225,7 @@ def search(query: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
     offset = (page - 1) * page_size
     
     results = []
+    source_filter = source.strip().lower() if source and source.strip().lower() != 'all' else None
     
     # 若检索词 >= 3 字符，优先使用 FTS5 检索
     if len(query) >= 3:
@@ -234,18 +235,32 @@ def search(query: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
             # FTS5 trigram 匹配：每个词带双引号精确切片匹配
             fts_match_expr = f'"{safe_query}"'
             
-            cursor.execute("""
-            SELECT 
-                i.id, i.source_id, i.title, i.author, i.url, i.duration_sec,
-                i.thumbnail_url, i.watched_at, i.sub_source,
-                snippet(subtitles_fts, 3, '<mark>', '</mark>', '...', 18) as fts_snippet,
-                bm25(subtitles_fts) as rank
-            FROM subtitles_fts f
-            JOIN items i ON i.id = f.item_id
-            WHERE subtitles_fts MATCH ?
-            ORDER BY rank ASC
-            LIMIT ? OFFSET ?;
-            """, (fts_match_expr, page_size, offset))
+            if source_filter:
+                cursor.execute("""
+                SELECT 
+                    i.id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+                    i.thumbnail_url, i.watched_at, i.sub_source,
+                    snippet(subtitles_fts, 3, '<mark>', '</mark>', '...', 18) as fts_snippet,
+                    bm25(subtitles_fts) as rank
+                FROM subtitles_fts f
+                JOIN items i ON i.id = f.item_id
+                WHERE subtitles_fts MATCH ? AND i.source = ?
+                ORDER BY rank ASC
+                LIMIT ? OFFSET ?;
+                """, (fts_match_expr, source_filter, page_size, offset))
+            else:
+                cursor.execute("""
+                SELECT 
+                    i.id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+                    i.thumbnail_url, i.watched_at, i.sub_source,
+                    snippet(subtitles_fts, 3, '<mark>', '</mark>', '...', 18) as fts_snippet,
+                    bm25(subtitles_fts) as rank
+                FROM subtitles_fts f
+                JOIN items i ON i.id = f.item_id
+                WHERE subtitles_fts MATCH ?
+                ORDER BY rank ASC
+                LIMIT ? OFFSET ?;
+                """, (fts_match_expr, page_size, offset))
             
             rows = cursor.fetchall()
             for r in rows:
@@ -284,15 +299,26 @@ def search(query: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
     # 若 FTS5 无结果或 query < 3 字符，使用模糊匹配
     if not results:
         like_expr = f"%{query}%"
-        cursor.execute("""
-        SELECT DISTINCT i.id, i.source_id, i.title, i.author, i.url, i.duration_sec,
-               i.thumbnail_url, i.watched_at, i.sub_source
-        FROM items i
-        LEFT JOIN video_subtitles vs ON vs.item_id = i.id
-        WHERE i.title LIKE ? OR i.author LIKE ? OR vs.text LIKE ?
-        ORDER BY i.id DESC
-        LIMIT ? OFFSET ?;
-        """, (like_expr, like_expr, like_expr, page_size, offset))
+        if source_filter:
+            cursor.execute("""
+            SELECT DISTINCT i.id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+                   i.thumbnail_url, i.watched_at, i.sub_source
+            FROM items i
+            LEFT JOIN video_subtitles vs ON vs.item_id = i.id
+            WHERE (i.title LIKE ? OR i.author LIKE ? OR vs.text LIKE ?) AND i.source = ?
+            ORDER BY i.id DESC
+            LIMIT ? OFFSET ?;
+            """, (like_expr, like_expr, like_expr, source_filter, page_size, offset))
+        else:
+            cursor.execute("""
+            SELECT DISTINCT i.id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+                   i.thumbnail_url, i.watched_at, i.sub_source
+            FROM items i
+            LEFT JOIN video_subtitles vs ON vs.item_id = i.id
+            WHERE i.title LIKE ? OR i.author LIKE ? OR vs.text LIKE ?
+            ORDER BY i.id DESC
+            LIMIT ? OFFSET ?;
+            """, (like_expr, like_expr, like_expr, page_size, offset))
         
         rows = cursor.fetchall()
         for r in rows:

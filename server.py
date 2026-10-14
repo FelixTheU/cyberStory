@@ -120,9 +120,10 @@ async def sync_youtube(req: SyncRequest):
 async def search_api(
     q: str = Query(..., min_length=1, description="搜索关键词"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100)
+    page_size: int = Query(20, ge=1, le=100),
+    source: Optional[str] = Query(None, description="数据源: all, youtube, zhihu")
 ):
-    result = database.search(q, page, page_size)
+    result = database.search(q, page, page_size, source)
     return result
 
 @app.get("/api/items/{item_id}/subtitles")

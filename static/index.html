@@ -2,30 +2,44 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>cyberstory - YouTube 知识与历史检索</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>cyberstory - 知识与历史全文检索</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+        * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --primary-light: #eff6ff;
+            --primary-border: #bfdbfe;
+            --border-color: #e2e8f0;
+            --bg-page: #f8fafc;
+            --bg-card: #ffffff;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --detail-width: 380px; /* 右侧收窄详情栏宽度 */
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-            background: #f8fafc;
-            color: #1e293b;
+            background: var(--bg-page);
+            color: var(--text-main);
             height: 100vh;
             display: flex;
             overflow: hidden;
         }
 
-        /* ─── 最左侧主导航栏 (Global Sidebar) ─── */
+        /* ─── 1. 左侧全局导航栏 (桌面端) ─── */
         .global-sidebar {
             width: 220px;
             background: #ffffff;
-            border-right: 1px solid #e2e8f0;
+            border-right: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
             flex-shrink: 0;
+            z-index: 20;
         }
         .brand {
-            padding: 20px 16px;
+            padding: 18px 16px;
             display: flex;
             align-items: center;
             gap: 10px;
@@ -42,12 +56,13 @@
             justify-content: center;
             font-weight: 900;
             font-size: 16px;
+            box-shadow: 0 2px 6px rgba(239,68,68,0.2);
         }
-        .brand-text h1 { font-size: 15px; font-weight: 700; color: #0f172a; }
-        .brand-text p { font-size: 11px; color: #64748b; }
+        .brand-text h1 { font-size: 15px; font-weight: 700; color: #0f172a; line-height: 1.2; }
+        .brand-text p { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 
         .nav-tabs {
-            padding: 16px 8px;
+            padding: 14px 10px;
             display: flex;
             flex-direction: column;
             gap: 6px;
@@ -62,33 +77,28 @@
             font-size: 13px;
             font-weight: 600;
             color: #475569;
-            text-decoration: none;
             cursor: pointer;
             transition: all 0.15s;
+            user-select: none;
         }
         .nav-tab:hover { background: #f1f5f9; color: #0f172a; }
-        .nav-tab.active { background: #eff6ff; color: #2563eb; }
+        .nav-tab.active { background: var(--primary-light); color: var(--primary); }
         .nav-tab .badge {
             margin-left: auto;
-            background: #e2e8f0;
-            color: #475569;
+            background: #f1f5f9;
+            color: #64748b;
             font-size: 11px;
             padding: 2px 7px;
             border-radius: 12px;
             font-weight: 500;
         }
-        .nav-tab.active .badge { background: #bfdbfe; color: #1d4ed8; }
-
-        .nav-tab.disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
+        .nav-tab.active .badge { background: var(--primary-border); color: #1d4ed8; }
 
         .service-status {
-            padding: 16px;
+            padding: 14px 16px;
             border-top: 1px solid #f1f5f9;
             font-size: 12px;
-            color: #64748b;
+            color: var(--text-muted);
             display: flex;
             align-items: center;
             gap: 8px;
@@ -100,41 +110,277 @@
             box-shadow: 0 0 0 3px rgba(34,197,94,0.15);
         }
 
-        /* ─── 主体工作区 (三列并排布局：A区 | B区 | C区) ─── */
+        /* ─── 2. 移动端底部导航栏 ─── */
+        .bottom-nav {
+            display: none;
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            height: 56px;
+            background: #ffffff;
+            border-top: 1px solid var(--border-color);
+            z-index: 100;
+            justify-content: space-around;
+            align-items: center;
+        }
+        .bottom-nav-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 2px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #64748b;
+            flex: 1;
+            height: 100%;
+            cursor: pointer;
+        }
+        .bottom-nav-item.active { color: var(--primary); }
+        .bottom-nav-item .icon { font-size: 18px; }
+
+        /* ─── 3. 主工作区总容器 ─── */
         .workspace {
             flex: 1;
             display: flex;
             overflow: hidden;
-            background: #f8fafc;
+            position: relative;
         }
 
-        /* ─── A区：历史记录列表 (Date-Grouped Feed) ─── */
-        .pane-history {
-            width: 380px;
+        .view-section {
+            display: none;
+            width: 100%;
+            height: 100%;
+        }
+        .view-section.active {
+            display: flex;
+        }
+
+        /* ─── 双栏结构：列表区宽 (flex:1) 与 详情区收窄 (width: var(--detail-width)) ─── */
+        .master-pane {
+            flex: 1; /* 主列表区域占据主导宽度，充裕舒展 */
             background: #ffffff;
-            border-right: 1px solid #e2e8f0;
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        .detail-pane {
+            width: var(--detail-width); /* 右侧收窄详情栏，专用于紧凑时间轴对照 */
+            background: #f8fafc;
             display: flex;
             flex-direction: column;
             flex-shrink: 0;
         }
+
         .pane-header {
-            padding: 16px 20px;
+            padding: 14px 20px;
             border-bottom: 1px solid #f1f5f9;
+            background: #ffffff;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            min-height: 57px;
         }
-        .pane-header h2 { font-size: 15px; font-weight: 700; color: #0f172a; }
-        .pane-header .header-meta { font-size: 12px; color: #64748b; }
+        .pane-header h2 { font-size: 15px; font-weight: 700; color: #0f172a; display: flex; align-items: center; gap: 8px; }
+        .pane-header .header-meta { font-size: 12px; color: var(--text-muted); }
 
+        /* ─── 搜索控制栏 ─── */
+        .search-control-bar {
+            padding: 14px 20px;
+            background: #ffffff;
+            border-bottom: 1px solid #f1f5f9;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .search-input-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .search-source-select {
+            padding: 9px 12px;
+            font-size: 13px;
+            font-weight: 600;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            background: #f8fafc;
+            color: #334155;
+            outline: none;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .search-source-select:focus {
+            border-color: var(--primary);
+            background: #fff;
+        }
+        .search-input-wrapper {
+            position: relative;
+            flex: 1;
+            display: flex;
+            align-items: center;
+        }
+        .search-input-wrapper .search-icon {
+            position: absolute;
+            left: 12px;
+            color: #94a3b8;
+            font-size: 14px;
+        }
+        .search-input {
+            width: 100%;
+            padding: 9px 12px 9px 34px;
+            font-size: 14px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            outline: none;
+            transition: all 0.2s;
+        }
+        .search-input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+        }
+        .search-submit-btn {
+            padding: 9px 18px;
+            background: var(--primary);
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s;
+            white-space: nowrap;
+        }
+        .search-submit-btn:hover { background: var(--primary-hover); }
+
+        .search-stats-bar {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: var(--text-muted);
+            padding: 0 2px;
+        }
+
+        /* ─── 搜索结果列表 ─── */
+        .result-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 20px;
+        }
+        .result-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 14px;
+            margin-bottom: 12px;
+            background: #fff;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .result-card:hover {
+            border-color: #93c5fd;
+            box-shadow: 0 4px 12px rgba(37,99,235,0.06);
+        }
+        .result-card.active {
+            border-color: var(--primary);
+            background: #f8faff;
+            box-shadow: 0 0 0 1px var(--primary);
+        }
+        .result-top {
+            display: flex;
+            gap: 14px;
+            margin-bottom: 10px;
+        }
+        .result-thumb {
+            width: 120px;
+            height: 68px;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #e2e8f0;
+            flex-shrink: 0;
+            position: relative;
+        }
+        .result-thumb img { width: 100%; height: 100%; object-fit: cover; }
+        .result-duration {
+            position: absolute;
+            bottom: 3px; right: 3px;
+            background: rgba(0,0,0,0.8);
+            color: #fff;
+            font-size: 10px;
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-weight: 600;
+        }
+        .result-info { flex: 1; min-width: 0; }
+        .result-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #1e293b;
+            line-height: 1.4;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .result-meta {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 6px;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .source-tag {
+            font-size: 10px;
+            font-weight: 700;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .source-tag.yt { background: #fee2e2; color: #dc2626; }
+        .source-tag.zhihu { background: #eff6ff; color: #2563eb; }
+
+        .result-snippet {
+            font-size: 13px;
+            line-height: 1.6;
+            color: #334155;
+            background: #f8fafc;
+            padding: 10px 12px;
+            border-radius: 6px;
+            border-left: 3px solid var(--primary);
+            margin-top: 8px;
+        }
+        .result-snippet mark {
+            background: #fef08a;
+            color: #0f172a;
+            padding: 1px 4px;
+            font-weight: 600;
+            border-radius: 2px;
+        }
+
+        .result-actions {
+            margin-top: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .time-jump-link {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--primary);
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .time-jump-link:hover { text-decoration: underline; }
+
+        /* ─── YouTube 历史流水列表 ─── */
         .history-feed {
             flex: 1;
             overflow-y: auto;
             padding: 16px 20px;
         }
-        .date-group {
-            margin-bottom: 24px;
-        }
+        .date-group { margin-bottom: 24px; }
         .date-title {
             font-size: 13px;
             font-weight: 700;
@@ -150,8 +396,8 @@
 
         .history-card {
             display: flex;
-            gap: 12px;
-            padding: 10px;
+            gap: 14px;
+            padding: 12px;
             border-radius: 8px;
             border: 1px solid #f1f5f9;
             margin-bottom: 10px;
@@ -164,63 +410,9 @@
             box-shadow: 0 2px 8px rgba(0,0,0,0.04);
         }
         .history-card.active {
-            border-color: #3b82f6;
+            border-color: var(--primary);
             background: #f8faff;
-        }
-        .thumb-box {
-            position: relative;
-            width: 100px;
-            height: 56px;
-            border-radius: 6px;
-            overflow: hidden;
-            background: #e2e8f0;
-            flex-shrink: 0;
-        }
-        .thumb-box img {
-            width: 100%; height: 100%; object-fit: cover;
-        }
-        .thumb-duration {
-            position: absolute;
-            bottom: 4px; right: 4px;
-            background: rgba(0,0,0,0.8);
-            color: #fff;
-            font-size: 10px;
-            padding: 1px 4px;
-            border-radius: 3px;
-            font-weight: 600;
-        }
-        .card-info {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            min-width: 0;
-        }
-        .card-title {
-            font-size: 12px;
-            font-weight: 600;
-            color: #1e293b;
-            line-height: 1.4;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-        }
-        .card-channel {
-            font-size: 11px;
-            color: #64748b;
-            margin-top: 3px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .card-badges {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            margin-top: 6px;
-            flex-wrap: wrap;
+            box-shadow: 0 0 0 1px var(--primary);
         }
         .badge-tag {
             font-size: 10px;
@@ -236,18 +428,18 @@
 
         .progress-block {
             margin-top: 6px;
-            font-size: 10px;
+            font-size: 11px;
             color: #b45366;
             background: #fffbeb;
-            padding: 4px 6px;
-            border-radius: 4px;
+            padding: 6px 8px;
+            border-radius: 6px;
             border: 1px solid #fde68a;
         }
         .progress-bar-bg {
             height: 4px;
             background: #fde68a;
             border-radius: 2px;
-            margin-top: 3px;
+            margin-top: 4px;
             overflow: hidden;
         }
         .progress-bar-val {
@@ -257,161 +449,14 @@
             transition: width 0.3s;
         }
 
-        /* ─── B区：搜索与检索卡片列表 (Search Stream) ─── */
-        .pane-search {
-            flex: 1.2;
-            background: #ffffff;
-            border-right: 1px solid #e2e8f0;
-            display: flex;
-            flex-direction: column;
-            min-width: 420px;
-        }
-        .search-header {
-            padding: 16px 20px;
-            border-bottom: 1px solid #f1f5f9;
-        }
-        .search-box {
-            position: relative;
-            display: flex;
-            align-items: center;
-        }
-        .search-icon {
-            position: absolute;
-            left: 14px;
-            font-size: 15px;
-            color: #94a3b8;
-        }
-        .search-input {
-            width: 100%;
-            padding: 10px 14px 10px 38px;
-            font-size: 14px;
-            border: 1px solid #cbd5e1;
-            border-radius: 8px;
-            outline: none;
-            transition: all 0.2s;
-        }
-        .search-input:focus {
-            border-color: #2563eb;
-            box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
-        }
-        .search-meta {
-            margin-top: 8px;
-            font-size: 12px;
-            color: #64748b;
-            display: flex;
-            justify-content: space-between;
-        }
-
-        .search-results {
-            flex: 1;
-            overflow-y: auto;
-            padding: 16px 20px;
-        }
-        .result-card {
-            border: 1px solid #e2e8f0;
-            border-radius: 8px;
-            padding: 14px;
-            margin-bottom: 14px;
-            background: #fff;
-            transition: all 0.15s;
-        }
-        .result-card:hover {
-            border-color: #93c5fd;
-            box-shadow: 0 4px 12px rgba(37,99,235,0.06);
-        }
-        .result-card.active-result {
-            border-color: #2563eb;
-            background: #f8faff;
-        }
-        .result-top {
-            display: flex;
-            gap: 12px;
-            margin-bottom: 10px;
-        }
-        .result-top .thumb-box {
-            width: 110px;
-            height: 62px;
-        }
-        .result-detail {
-            flex: 1;
-            min-width: 0;
-        }
-        .result-title {
-            font-size: 13px;
-            font-weight: 700;
-            color: #0f172a;
-            line-height: 1.4;
-        }
-        .result-meta {
-            font-size: 11px;
-            color: #64748b;
-            margin-top: 4px;
-            display: flex;
-            gap: 10px;
-        }
-
-        .snippet-box {
-            background: #f8fafc;
-            border-left: 3px solid #2563eb;
-            padding: 8px 12px;
-            border-radius: 0 6px 6px 0;
-            margin-top: 8px;
-            font-size: 12px;
-            color: #334155;
-            line-height: 1.5;
-        }
-        .snippet-box mark {
-            background: #fef08a;
-            color: #854d0e;
-            font-weight: 600;
-            padding: 1px 3px;
-            border-radius: 3px;
-        }
-        .result-actions {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-top: 10px;
-            padding-top: 8px;
-            border-top: 1px dashed #f1f5f9;
-        }
-        .time-jump-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            font-size: 12px;
-            font-weight: 600;
-            color: #2563eb;
-            background: #eff6ff;
-            padding: 4px 8px;
-            border-radius: 4px;
-            text-decoration: none;
-        }
-        .time-jump-btn:hover { background: #dbeafe; }
-        .view-detail-btn {
-            font-size: 12px;
-            color: #64748b;
-            background: none;
-            border: none;
-            cursor: pointer;
-            font-weight: 600;
-        }
-        .view-detail-btn:hover { color: #0f172a; text-decoration: underline; }
-
-        /* ─── C区：详情与字幕时间轴列表 (Detail Timeline) ─── */
-        .pane-detail {
-            width: 440px;
-            background: #ffffff;
-            display: flex;
-            flex-direction: column;
-            flex-shrink: 0;
-        }
+        /* ─── 右侧收窄详情栏 (Context & Subtitle Stream) ─── */
         .detail-header {
-            padding: 16px 20px;
+            padding: 14px 16px;
+            background: #ffffff;
             border-bottom: 1px solid #f1f5f9;
         }
         .detail-title {
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 700;
             color: #0f172a;
             line-height: 1.4;
@@ -423,59 +468,74 @@
         .detail-meta-bar {
             display: flex;
             align-items: center;
-            gap: 8px;
-            margin-top: 8px;
+            gap: 6px;
             font-size: 11px;
-            color: #64748b;
+            color: var(--text-muted);
+            margin-top: 4px;
+            flex-wrap: wrap;
         }
         .sub-filter-box {
-            padding: 10px 20px;
-            border-bottom: 1px solid #f1f5f9;
+            padding: 8px 16px;
             background: #f8fafc;
+            border-bottom: 1px solid #e2e8f0;
         }
         .sub-filter-input {
             width: 100%;
-            padding: 6px 12px;
+            padding: 6px 10px;
             font-size: 12px;
             border: 1px solid #cbd5e1;
             border-radius: 6px;
             outline: none;
+            background: #fff;
         }
-        .sub-filter-input:focus { border-color: #2563eb; }
+        .sub-filter-input:focus { border-color: var(--primary); }
 
         .timeline-stream {
             flex: 1;
             overflow-y: auto;
-            padding: 12px 16px;
+            padding: 10px 12px;
         }
         .timeline-row {
             display: flex;
-            gap: 12px;
-            padding: 8px;
+            gap: 8px;
+            padding: 6px 8px;
             border-radius: 6px;
             font-size: 12px;
             line-height: 1.5;
             transition: background 0.15s;
         }
         .timeline-row:hover { background: #f1f5f9; }
-        .timeline-row.highlighted { background: #fef9c3; }
+        .timeline-row.highlighted {
+            background: #fef9c3;
+            border-left: 3px solid #eab308;
+        }
         .time-badge {
             font-family: monospace;
             font-size: 11px;
             font-weight: 700;
-            color: #2563eb;
-            background: #eff6ff;
-            padding: 2px 6px;
+            color: var(--primary);
+            background: var(--primary-light);
+            padding: 1px 5px;
             border-radius: 4px;
             height: fit-content;
             flex-shrink: 0;
             cursor: pointer;
             text-decoration: none;
         }
-        .time-badge:hover { background: #bfdbfe; }
-        .timeline-text {
-            color: #334155;
-            flex: 1;
+        .time-badge:hover { background: var(--primary-border); }
+        .timeline-text { color: #334155; flex: 1; word-break: break-word; }
+
+        .mobile-back-btn {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--primary);
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0 0 8px 0;
         }
 
         .empty-hint {
@@ -484,11 +544,41 @@
             color: #94a3b8;
             font-size: 13px;
         }
+
+        /* ─── 4. 移动设备友好响应式适配 (≤ 768px) ─── */
+        @media (max-width: 768px) {
+            body { flex-direction: column; }
+            .global-sidebar { display: none; }
+            .bottom-nav { display: flex; }
+            .workspace { height: calc(100vh - 56px); }
+
+            .master-pane {
+                width: 100%;
+                border-right: none;
+            }
+            .detail-pane {
+                display: none;
+                position: absolute;
+                top: 0; left: 0; right: 0; bottom: 0;
+                width: 100%;
+                background: #ffffff;
+                z-index: 50;
+            }
+            .detail-pane.mobile-open {
+                display: flex;
+            }
+            .mobile-back-btn { display: inline-flex; }
+
+            .search-input-group { flex-wrap: wrap; }
+            .search-source-select { width: 100%; }
+            .search-submit-btn { width: 100%; }
+            .result-thumb { width: 100px; height: 56px; }
+        }
     </style>
 </head>
 <body>
 
-    <!-- ─── 0. 最左侧总导航栏 ─── -->
+    <!-- ─── 1. 桌面端全局侧边栏 (Tab 1: 搜索, Tab 2: YouTube, Tab 3: 知乎) ─── -->
     <aside class="global-sidebar">
         <div class="brand">
             <div class="brand-logo">C</div>
@@ -498,79 +588,150 @@
             </div>
         </div>
 
-        <div class="nav-tabs">
-            <div class="nav-tab active">
-                <span>📺 YouTube 历史记录</span>
-                <span class="badge" id="navBadgeCount">-</span>
+        <nav class="nav-tabs">
+            <div class="nav-tab active" id="tab-nav-search" onclick="switchMainTab('search')">
+                <span>🔍 全局搜索</span>
             </div>
-            <div class="nav-tab disabled" title="后续扩展计划">
-                <span>💡 知乎浏览历史</span>
+            <div class="nav-tab" id="tab-nav-youtube" onclick="switchMainTab('youtube')">
+                <span>📺 YouTube 历史</span>
+                <span class="badge" id="navYtCount">0</span>
+            </div>
+            <div class="nav-tab" id="tab-nav-zhihu" onclick="switchMainTab('zhihu')">
+                <span>💡 知乎历史记录</span>
                 <span class="badge">即将推出</span>
             </div>
-            <div class="nav-tab disabled" title="后续扩展计划">
-                <span>📖 微信公众号文章</span>
-                <span class="badge">即将推出</span>
-            </div>
-        </div>
+        </nav>
 
         <div class="service-status">
             <span class="status-dot" id="serviceDot"></span>
-            <span id="serviceStatusText">本地服务检测中...</span>
+            <span id="serviceStatusText">服务运行中 (:8765)</span>
         </div>
     </aside>
 
-    <!-- ─── 主工作区：纵向三列 (A区 | B区 | C区) ─── -->
+    <!-- ─── 2. 主工作区 ─── -->
     <main class="workspace">
 
-        <!-- ─── A区：历史记录列表 (按日期组织 + 状态指示) ─── -->
-        <section class="pane-history">
-            <div class="pane-header">
-                <h2>YouTube 历史流水</h2>
-                <span class="header-meta" id="historyMetaCount">加载中...</span>
+        <!-- ═════════ 视图 A：全局搜索 (Tab 1) ═════════ -->
+        <section class="view-section active" id="view-search">
+            <!-- 左侧：宽敞的主搜索结果列表 (flex: 1) -->
+            <div class="master-pane">
+                <div class="pane-header">
+                    <h2>🔍 全局知识检索</h2>
+                    <span class="header-meta">台词级全文检索 (FTS5)</span>
+                </div>
+
+                <div class="search-control-bar">
+                    <div class="search-input-group">
+                        <select class="search-source-select" id="searchSourceSelect" onchange="doSearch()">
+                            <option value="all">🌐 全部数据源</option>
+                            <option value="youtube" selected>📺 YouTube 台词</option>
+                            <option value="zhihu">💡 知乎历史记录</option>
+                        </select>
+                        <div class="search-input-wrapper">
+                            <span class="search-icon">🔍</span>
+                            <input type="text" class="search-input" id="searchInput" placeholder="检索台词、观点、关键词... (按 Enter 搜索)">
+                        </div>
+                        <button class="search-submit-btn" id="searchBtn" onclick="doSearch()">搜索</button>
+                    </div>
+                    <div class="search-stats-bar">
+                        <span id="searchResultStats">请输入关键词搜索台词与内容</span>
+                        <span id="searchTimeCost"></span>
+                    </div>
+                </div>
+
+                <div class="result-list" id="searchResults">
+                    <div class="empty-hint">请输入关键词开始检索，点击卡片可在右侧查看上下文台词</div>
+                </div>
             </div>
 
-            <div class="history-feed" id="historyFeed">
-                <div class="empty-hint">正在读取历史记录...</div>
+            <!-- 右侧：收窄的上下文台词详情栏 (width: 380px) -->
+            <div class="detail-pane" id="searchDetailPane">
+                <div class="detail-header">
+                    <button class="mobile-back-btn" onclick="closeMobileDetail('searchDetailPane')">← 返回搜索列表</button>
+                    <div class="detail-title" id="searchDetailTitle">选择卡片查看上下文台词</div>
+                    <div class="detail-meta-bar" id="searchDetailMeta">
+                        <span>点击左侧卡片后在此处对照时间戳</span>
+                    </div>
+                </div>
+
+                <div class="sub-filter-box">
+                    <input type="text" class="sub-filter-input" id="searchSubFilter" placeholder="在上下文台词流中二次筛选...">
+                </div>
+
+                <div class="timeline-stream" id="searchTimelineStream">
+                    <div class="empty-hint">暂未选择视频</div>
+                </div>
             </div>
         </section>
 
-        <!-- ─── B区：搜索与结果流 (Search & Highlights) ─── -->
-        <section class="pane-search">
-            <div class="search-header">
-                <div class="search-box">
-                    <span class="search-icon">🔍</span>
-                    <input type="text" class="search-input" id="searchInput" placeholder="全局检索视频标题、频道、台词文本... (按 Enter 搜索)">
+        <!-- ═════════ 视图 B：YouTube 历史记录 (Tab 2，移除搜索区，纯双栏) ═════════ -->
+        <section class="view-section" id="view-youtube">
+            <!-- 左侧：宽敞的历史流水主列表 (flex: 1) -->
+            <div class="master-pane">
+                <div class="pane-header">
+                    <h2>📺 YouTube 历史流水</h2>
+                    <span class="header-meta" id="ytHistoryCount">加载中...</span>
                 </div>
-                <div class="search-meta">
-                    <span id="searchMetaText">输入关键词检索全文台词</span>
-                    <span id="searchCostText"></span>
+
+                <div class="history-feed" id="ytHistoryFeed">
+                    <div class="empty-hint">正在读取历史记录...</div>
                 </div>
             </div>
 
-            <div class="search-results" id="searchResults">
-                <div class="empty-hint">请输入关键词开始检索，或点击左侧历史卡片查看详情</div>
+            <!-- 右侧：收窄的字幕详情时间轴 (width: 380px) -->
+            <div class="detail-pane" id="ytDetailPane">
+                <div class="detail-header">
+                    <button class="mobile-back-btn" onclick="closeMobileDetail('ytDetailPane')">← 返回历史流水</button>
+                    <div class="detail-title" id="ytDetailTitle">请选择一个视频</div>
+                    <div class="detail-meta-bar" id="ytDetailMeta">
+                        <span>点击左侧视频卡片展开完整字幕流</span>
+                    </div>
+                </div>
+
+                <div class="sub-filter-box">
+                    <input type="text" class="sub-filter-input" id="ytSubFilter" placeholder="在当前全篇字幕中二次过滤...">
+                </div>
+
+                <div class="timeline-stream" id="ytTimelineStream">
+                    <div class="empty-hint">暂未选择视频</div>
+                </div>
             </div>
         </section>
 
-        <!-- ─── C区：详情与完整台词时间轴列表 (Detail Timeline) ─── -->
-        <section class="pane-detail">
-            <div class="detail-header">
-                <div class="detail-title" id="detailTitle">请选择一个视频</div>
-                <div class="detail-meta-bar" id="detailMetaBar">
-                    <span>-</span>
+        <!-- ═════════ 视图 C：知乎历史记录 (Tab 3) ═════════ -->
+        <section class="view-section" id="view-zhihu">
+            <div class="master-pane" style="width:100%; border-right:none;">
+                <div class="pane-header">
+                    <h2>💡 知乎浏览历史</h2>
+                    <span class="header-meta">扩展模块</span>
                 </div>
-            </div>
-
-            <div class="sub-filter-box">
-                <input type="text" class="sub-filter-input" id="subFilterInput" placeholder="在当前全篇字幕中二次过滤...">
-            </div>
-
-            <div class="timeline-stream" id="timelineStream">
-                <div class="empty-hint">点击左侧历史记录或搜索结果的【查看字幕】展开时间轴</div>
+                <div class="empty-hint" style="padding: 100px 20px;">
+                    <div style="font-size: 40px; margin-bottom: 16px;">💡</div>
+                    <h3 style="font-size: 16px; color: #1e293b; margin-bottom: 8px;">知乎浏览历史同步 (即将上线)</h3>
+                    <p style="color: #64748b; font-size: 13px; max-width: 440px; margin: 0 auto; line-height: 1.6;">
+                        已为系统底层数据模型预留 <code>source='zhihu'</code>。配套油猴采集脚本将支持自动提取知乎已读回答与专栏正文，与 YouTube 视频台词共享毫秒级 FTS5 全文索引网络。
+                    </p>
+                </div>
             </div>
         </section>
 
     </main>
+
+    <!-- ─── 3. 移动端底部导航栏 ─── -->
+    <nav class="bottom-nav">
+        <div class="bottom-nav-item active" id="bnav-search" onclick="switchMainTab('search')">
+            <span class="icon">🔍</span>
+            <span>搜索</span>
+        </div>
+        <div class="bottom-nav-item" id="bnav-youtube" onclick="switchMainTab('youtube')">
+            <span class="icon">📺</span>
+            <span>YouTube</span>
+        </div>
+        <div class="bottom-nav-item" id="bnav-zhihu" onclick="switchMainTab('zhihu')">
+            <span class="icon">💡</span>
+            <span>知乎</span>
+        </div>
+    </nav>
 
     <script src="/static/app.js"></script>
 </body>

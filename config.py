@@ -12,7 +12,7 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "cyber_history.db"
 
 # 服务端口与主机
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = 8765
 
 # 代理配置 (支持本地代理如 Clash/V2Ray，留空则不使用代理)
