@@ -148,8 +148,35 @@ def parse_vtt(vtt_path: Path) -> List[Dict[str, Any]]:
     return segments
 
 
+# 全局单例 WhisperModel 实例与加载锁，避免每个视频重复构造模型
+_WHISPER_MODEL_INSTANCE = None
+_WHISPER_LOCK = None
+
+def get_whisper_model():
+    """获取进程级常驻 WhisperModel 单例实例"""
+    global _WHISPER_MODEL_INSTANCE, _WHISPER_LOCK
+    if _WHISPER_LOCK is None:
+        import threading
+        _WHISPER_LOCK = threading.Lock()
+    
+    if _WHISPER_MODEL_INSTANCE is None:
+        with _WHISPER_LOCK:
+            if _WHISPER_MODEL_INSTANCE is None:
+                from faster_whisper import WhisperModel
+                logger.info(f"Initializing global WhisperModel instance ({config.WHISPER_MODEL}, {config.WHISPER_COMPUTE_TYPE}, threads={getattr(config, 'WHISPER_CPU_THREADS', 2)})...")
+                _WHISPER_MODEL_INSTANCE = WhisperModel(
+                    config.WHISPER_MODEL,
+                    device=config.WHISPER_DEVICE,
+                    compute_type=config.WHISPER_COMPUTE_TYPE,
+                    cpu_threads=getattr(config, "WHISPER_CPU_THREADS", 2),
+                    num_workers=1
+                )
+                logger.info("Global WhisperModel instance loaded and resident in memory.")
+    return _WHISPER_MODEL_INSTANCE
+
+
 def download_audio_file(video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[Path]:
-    """下载阶段：拉取完整音频文件，不截断。下载成功返回本地音频路径，失败返回 None"""
+    """下载阶段：拉取 16kHz 单声道轻量音频，不截断。缩减 70% 下载体积并消除 Whisper 重采样开销"""
     audio_dir = config.TEMP_DIR / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
@@ -163,7 +190,8 @@ def download_audio_file(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opt
 
     cmd = [
         str(ytdlp_bin),
-        "-x", "--audio-format", "opus", "--audio-quality", "0",
+        "-x", "--audio-format", "opus",
+        "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1 -b:a 32k",
         "-o", str(audio_path),
         f"https://www.youtube.com/watch?v={video_id}",
     ]
@@ -187,7 +215,7 @@ def download_audio_file(video_id: str, item_id: int = 0, t0: float = 0.0) -> Opt
 
 
 def transcribe_audio_file(audio_path: Path, video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[List[Dict[str, Any]]]:
-    """ASR 阶段：使用 faster-whisper 转录本地音频，并在完成后强制删除音频文件"""
+    """ASR 阶段：使用常驻单例 faster-whisper 转录本地音频，并在完成后强制删除音频文件"""
     # 限制进程优先级为低于正常
     try:
         import psutil
@@ -200,16 +228,9 @@ def transcribe_audio_file(audio_path: Path, video_id: str, item_id: int = 0, t0:
     try:
         if item_id:
             elapsed = time.time() - t0 if t0 else 0
-            database.update_item_status(item_id, status="processing", current_step="Whisper模型加载", progress_pct=40, cost_time_sec=elapsed)
+            database.update_item_status(item_id, status="processing", current_step="Whisper模型就绪", progress_pct=40, cost_time_sec=elapsed)
 
-        from faster_whisper import WhisperModel
-        model = WhisperModel(
-            config.WHISPER_MODEL,
-            device=config.WHISPER_DEVICE,
-            compute_type=config.WHISPER_COMPUTE_TYPE,
-            cpu_threads=getattr(config, "WHISPER_CPU_THREADS", 2),
-            num_workers=1
-        )
+        model = get_whisper_model()
 
         if item_id:
             elapsed = time.time() - t0 if t0 else 0

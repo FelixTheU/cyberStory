@@ -448,13 +448,17 @@
         }
         .time-jump-link:hover { text-decoration: underline; }
 
-        /* ─── YouTube 历史流水列表 (支持日期折叠) ─── */
+        /* ─── YouTube 历史流水列表 (支持日期折叠与虚拟布局优化) ─── */
         .history-feed {
             flex: 1;
             overflow-y: auto;
             padding: 16px 20px;
         }
-        .date-group { margin-bottom: 20px; }
+        .date-group {
+            margin-bottom: 20px;
+            content-visibility: auto;
+            contain-intrinsic-size: 0 260px;
+        }
         .date-title {
             font-size: 13px;
             font-weight: 700;
@@ -496,6 +500,8 @@
             background: #fff;
             cursor: pointer;
             transition: all 0.15s;
+            content-visibility: auto;
+            contain-intrinsic-size: 0 88px;
         }
         .history-card:hover {
             border-color: #cbd5e1;
@@ -969,6 +975,11 @@
                         <span class="task-stat-title">官方原生字幕</span>
                         <span class="task-stat-val" id="statNativeCount" style="color:#7c3aed;">0</span>
                         <span class="task-stat-sub" id="statNativePct">占比 0% | 创作者上传</span>
+                    </div>
+                    <div class="task-stat-card">
+                        <span class="task-stat-title">音频缓冲池</span>
+                        <span class="task-stat-val" id="statAudioCache" style="color:#0284c7;">0 MB</span>
+                        <span class="task-stat-sub" id="statAudioCacheSub">背压限额 500 MB</span>
                     </div>
                 </div>
 

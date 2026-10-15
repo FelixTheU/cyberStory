@@ -34,3 +34,7 @@ WHISPER_CPU_THREADS = int(os.environ.get("CYBER_WHISPER_THREADS", "2"))
 # 0 表示取消长视频截断，转录完整全长音频
 MAX_ASR_DURATION_SEC = 0
 
+# 生产者-消费者音频缓冲池最大磁盘占用 (MB)，超额时触发背压限流，暂停下载音频
+MAX_AUDIO_CACHE_MB = int(os.environ.get("CYBER_MAX_AUDIO_CACHE_MB", "500"))
+
+

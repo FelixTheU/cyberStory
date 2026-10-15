@@ -478,6 +478,19 @@ async function loadTasks() {
         if (nativeCountEl) nativeCountEl.textContent = sum.native_count || 0;
         if (nativePctEl) nativePctEl.textContent = `占比 ${sum.native_pct || 0}% | 创作者上传`;
 
+        // 500MB 生产者-消费者音频缓冲池统计卡片
+        const cacheMb = sum.audio_cache_mb || 0;
+        const cacheEl = document.getElementById('statAudioCache');
+        const cacheSubEl = document.getElementById('statAudioCacheSub');
+        if (cacheEl) {
+            cacheEl.textContent = `${cacheMb} MB`;
+            cacheEl.style.color = cacheMb >= 480 ? '#dc2626' : '#0284c7';
+        }
+        if (cacheSubEl) {
+            cacheSubEl.textContent = cacheMb >= 480 ? '⚠️ 触发背压暂停拉取' : '背压限额 500 MB (随转随删)';
+            cacheSubEl.style.color = cacheMb >= 480 ? '#dc2626' : '#64748b';
+        }
+
         // 3. 更新侧边栏/底部 Tab 角标 (展示排队待完成总量)
         const tasksBadge = document.getElementById('navTasksBadge');
         if (tasksBadge) {

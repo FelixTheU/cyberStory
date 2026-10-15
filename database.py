@@ -4,12 +4,25 @@ from typing import List, Dict, Any, Optional
 from config import DB_PATH
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+    conn = sqlite3.connect(str(DB_PATH), timeout=60.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA busy_timeout = 60000;")
+    conn.execute("PRAGMA wal_autocheckpoint = 1000;")
     return conn
+
+def get_audio_cache_bytes() -> int:
+    """统计临时音频缓冲池当前实际磁盘占用 (bytes)，用于背压限流判断"""
+    from config import TEMP_DIR
+    audio_dir = TEMP_DIR / "audio"
+    if not audio_dir.exists():
+        return 0
+    try:
+        return sum(f.stat().st_size for f in audio_dir.glob("*") if f.is_file())
+    except Exception:
+        return 0
 
 def init_db():
     conn = get_connection()
@@ -535,6 +548,9 @@ def get_stats() -> Dict[str, Any]:
 
     coverage_pct = round((ready / total * 100), 1) if total > 0 else 0
     
+    cache_bytes = get_audio_cache_bytes()
+    cache_mb = round(cache_bytes / (1024 * 1024), 1)
+
     conn.close()
     return {
         "total_videos": total,
@@ -545,6 +561,7 @@ def get_stats() -> Dict[str, Any]:
         "native_count": native_count,
         "native_pct": native_pct,
         "asr_count": asr_count,
+        "audio_cache_mb": cache_mb,
         "total_segments": total_segments,
         "sub_coverage_pct": coverage_pct
     }

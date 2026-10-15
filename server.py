@@ -42,7 +42,7 @@ download_worker_task: Optional[asyncio.Task] = None
 asr_worker_task: Optional[asyncio.Task] = None
 
 def run_download_job(item: Dict[str, Any]):
-    """下载 Worker 任务函数：首先尝试抓取原生字幕，若无则拉取音频并将状态流转至 audio_ready"""
+    """下载 Worker 任务函数：首先尝试抓取原生字幕，若无则检查背压缓冲区，未超限则拉取音频并将状态流转至 audio_ready"""
     from pipeline import try_fetch_subtitles, download_audio_file
     source_id = item["source_id"]
     item_id = item.get("ts_id") or item["id"]
@@ -50,7 +50,7 @@ def run_download_job(item: Dict[str, Any]):
 
     database.update_item_status(item_id, status="downloading", current_step="检测字幕", progress_pct=15)
 
-    # 1. 优先尝试原生字幕
+    # 1. 优先尝试原生字幕 (文本字幕无需占用音频缓冲池)
     segments = try_fetch_subtitles(source_id)
     if segments:
         cost = time.time() - t0
@@ -58,7 +58,16 @@ def run_download_job(item: Dict[str, Any]):
         database.save_subtitles_and_index(item_id, segments, "native", cost_time_sec=cost)
         return
 
-    # 2. 无原生字幕，执行音频下载
+    # 2. 检查背压 (Backpressure)：当前音频缓冲池是否超过上限 (默认 500 MB)
+    max_cache_bytes = getattr(config, "MAX_AUDIO_CACHE_MB", 500) * 1024 * 1024
+    current_cache_bytes = database.get_audio_cache_bytes()
+    if current_cache_bytes >= max_cache_bytes:
+        cur_mb = current_cache_bytes / (1024 * 1024)
+        logger.info(f"[Backpressure] Audio cache full ({cur_mb:.1f}MB >= {config.MAX_AUDIO_CACHE_MB}MB), pausing download worker")
+        database.update_item_status(item_id, status="pending", current_step="等待音频缓冲释放(500MB限额)", progress_pct=0)
+        return
+
+    # 3. 缓冲区未超额，执行音频下载
     database.update_item_status(item_id, status="downloading", current_step="音频下载中", progress_pct=30)
     audio_path = download_audio_file(source_id, item_id=item_id, t0=t0)
     cost = time.time() - t0
@@ -111,12 +120,18 @@ def run_asr_job(item: Dict[str, Any]):
 
 
 async def download_worker():
-    """Worker 1: 专用音频下载与字幕提取，高 I/O 并发"""
+    """Worker 1: 专用音频下载与字幕提取，高 I/O 并发（内置 500MB 磁盘背压限流）"""
     logger.info("Download worker started")
     while True:
         try:
             if not pipeline_running:
                 await asyncio.sleep(2)
+                continue
+
+            # 背压限流检测：当前音频池达到 500MB 时，暂停拉取新音频，放缓轮询等待 ASRWorker 消费
+            max_cache_bytes = getattr(config, "MAX_AUDIO_CACHE_MB", 500) * 1024 * 1024
+            if database.get_audio_cache_bytes() >= max_cache_bytes:
+                await asyncio.sleep(5)
                 continue
 
             item = database.get_next_pending_item()
