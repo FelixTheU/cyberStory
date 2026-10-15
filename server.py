@@ -37,6 +37,7 @@ class SyncRequest(BaseModel):
 
 # --- Background Multi-Workers (解耦音频下载 worker 与 ASR worker) ---
 
+pipeline_running: bool = True
 download_worker_task: Optional[asyncio.Task] = None
 asr_worker_task: Optional[asyncio.Task] = None
 
@@ -66,8 +67,8 @@ def run_download_job(item: Dict[str, Any]):
         logger.info(f"[{source_id}] Audio downloaded in {cost:.1f}s, transitioning to audio_ready")
         database.update_item_status(item_id, status="audio_ready", current_step="音频就绪待转写", progress_pct=35, cost_time_sec=cost)
     else:
-        logger.warning(f"[{source_id}] Audio download failed, indexing title only")
-        database.save_subtitles_and_index(item_id, [], "none", cost_time_sec=cost)
+        logger.warning(f"[{source_id}] Audio download failed, keeping as pending for retry")
+        database.update_item_status(item_id, status="pending", current_step="下载未成功(重试排队)", progress_pct=0, cost_time_sec=cost)
 
 
 def run_asr_job(item: Dict[str, Any]):
@@ -94,11 +95,11 @@ def run_asr_job(item: Dict[str, Any]):
             logger.info(f"[{source_id}] ASR worker completed: {len(segments)} segments in {cost:.1f}s")
             database.save_subtitles_and_index(item_id, segments, "asr", cost_time_sec=cost)
         else:
-            logger.warning(f"[{source_id}] ASR produced no segments, indexing title only")
-            database.save_subtitles_and_index(item_id, [], "none", cost_time_sec=cost)
+            logger.warning(f"[{source_id}] ASR produced no segments, re-queueing as pending")
+            database.update_item_status(item_id, status="pending", current_step="待重新识别", progress_pct=0, cost_time_sec=cost)
     except Exception as e:
         logger.error(f"[{source_id}] ASR worker failed: {e}")
-        database.update_item_status(item_id, status="failed", error_message=str(e))
+        database.update_item_status(item_id, status="pending", current_step="识别异常(等待重试)", progress_pct=0, error_message=str(e))
     finally:
         # 确保音频文件被彻底删除
         try:
@@ -114,6 +115,10 @@ async def download_worker():
     logger.info("Download worker started")
     while True:
         try:
+            if not pipeline_running:
+                await asyncio.sleep(2)
+                continue
+
             item = database.get_next_pending_item()
             if item:
                 logger.info(f"[DownloadWorker] Picked [{item['source_id']}] {item['title'][:30]}")
@@ -121,7 +126,7 @@ async def download_worker():
                     await asyncio.get_event_loop().run_in_executor(None, run_download_job, item)
                 except Exception as e:
                     logger.error(f"[DownloadWorker] Failed {item['source_id']}: {e}")
-                    database.update_item_status(item["id"], "failed", str(e))
+                    database.update_item_status(item["id"], "pending", str(e))
                 await asyncio.sleep(2)
             else:
                 await asyncio.sleep(6)
@@ -135,16 +140,19 @@ async def asr_worker():
     logger.info("ASR worker started")
     while True:
         try:
+            if not pipeline_running:
+                await asyncio.sleep(2)
+                continue
+
             item = database.get_next_audio_ready_item()
             if item:
                 logger.info(f"[ASRWorker] Picked [{item['source_id']}] {item['title'][:30]}")
-                # 立即把状态标记为 transcribing，防止下一轮重复取同一个任务
                 database.update_item_status(item["id"], status="transcribing", current_step="Whisper模型加载", progress_pct=40)
                 try:
                     await asyncio.get_event_loop().run_in_executor(None, run_asr_job, item)
                 except Exception as e:
                     logger.error(f"[ASRWorker] Failed {item['source_id']}: {e}")
-                    database.update_item_status(item["id"], "failed", str(e))
+                    database.update_item_status(item["id"], "pending", str(e))
                 await asyncio.sleep(1)
             else:
                 await asyncio.sleep(4)
@@ -275,7 +283,27 @@ async def history_feed():
 @app.get("/api/tasks")
 async def tasks_api():
     """获取任务管理数据：总体概览统计，进行中与排队中任务列表"""
-    return database.get_tasks()
+    data = database.get_tasks()
+    data["pipeline_running"] = pipeline_running
+    return data
+
+@app.get("/api/pipeline/state")
+async def pipeline_state():
+    return {"running": pipeline_running}
+
+@app.post("/api/pipeline/pause")
+async def pipeline_pause():
+    global pipeline_running
+    pipeline_running = False
+    logger.info("Pipeline paused by user")
+    return {"running": False, "message": "已暂停任务调度"}
+
+@app.post("/api/pipeline/resume")
+async def pipeline_resume():
+    global pipeline_running
+    pipeline_running = True
+    logger.info("Pipeline resumed by user")
+    return {"running": True, "message": "已恢复任务调度"}
 
 @app.get("/api/status")
 async def status():

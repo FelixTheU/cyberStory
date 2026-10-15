@@ -195,7 +195,8 @@ function renderSearchResults(items, keyword) {
         const isFirst = idx === 0;
         const isShort = (item.url && item.url.includes('/shorts/')) || (item.author === 'YouTube Shorts');
         const durText = escapeHtml(item.duration_str || formatSeconds(item.duration_sec));
-        const durationLabel = isShort ? `Shorts · ${durText}` : durText;
+        // Shorts 视频统一移除时长显示，仅显示 Shorts 标识；常规长视频显示真实时长
+        const durationLabel = isShort ? 'Shorts' : durText;
         const sourceClass = item.source === 'zhihu' ? 'zhihu' : 'yt';
         const sourceName = item.source === 'zhihu' ? '知乎' : 'YouTube';
 
@@ -332,9 +333,9 @@ function renderYtFeed(groups) {
             const isActive = ytActiveItemId === itemId ? 'active' : '';
             if (!firstReadyItem && item.status === 'ready') firstReadyItem = item;
             const isShort = (item.url && item.url.includes('/shorts/')) || (item.author === 'YouTube Shorts');
-            // 显示真实时长，如果是 Shorts 则额外加上 [Shorts] 标识
             const durText = escapeHtml(item.duration_str || '00:00');
-            const durationLabel = isShort ? `Shorts · ${durText}` : durText;
+            // Shorts 视频统一移除时长显示，仅显示 Shorts 标识；常规长视频显示真实时长
+            const durationLabel = isShort ? 'Shorts' : durText;
 
             let badgeHtml = '';
             let progressHtml = '';
@@ -456,7 +457,10 @@ async function loadTasks() {
         if (!res.ok) return;
         const data = await res.json();
 
-        // 1. 更新顶部总览指标 (严格保证：已就绪数 + 排队数 = 视频总收录数)
+        // 1. 更新调度状态 UI
+        updatePipelineUI(data.pipeline_running !== false);
+
+        // 2. 更新顶部总览指标 (严格保证：已就绪数 + 排队数 = 视频总收录数)
         const sum = data.summary || {};
         const totalVideos = sum.total_videos || 0;
         const readyVideos = sum.ready || 0;
@@ -468,19 +472,66 @@ async function loadTasks() {
         document.getElementById('statReadyCoverage').textContent = `${sum.sub_coverage_pct || 0}%`;
         document.getElementById('statReadySubCount').textContent = `已就绪 ${readyVideos} 部 (共 ${sum.total_segments || 0} 句)`;
 
-        // 2. 更新侧边栏/底部 Tab 角标 (展示排队待完成总量)
+        // 官方原生字幕统计卡片
+        const nativeCountEl = document.getElementById('statNativeCount');
+        const nativePctEl = document.getElementById('statNativePct');
+        if (nativeCountEl) nativeCountEl.textContent = sum.native_count || 0;
+        if (nativePctEl) nativePctEl.textContent = `占比 ${sum.native_pct || 0}% | 创作者上传`;
+
+        // 3. 更新侧边栏/底部 Tab 角标 (展示排队待完成总量)
         const tasksBadge = document.getElementById('navTasksBadge');
         if (tasksBadge) {
             tasksBadge.textContent = pendingVideos;
             tasksBadge.classList.toggle('pulse', (sum.processing || 0) > 0);
         }
 
-        // 3. 如果当前处于任务管理界面，渲染任务流
+        // 4. 如果当前处于任务管理界面，渲染任务流
         if (currentTab === 'tasks') {
             renderTaskList(data.tasks || []);
         }
     } catch (e) {
         console.error('Failed to load tasks', e);
+    }
+}
+
+// 调度启动与暂停控制
+async function togglePipeline() {
+    try {
+        const stateRes = await fetch(`${API_BASE}/api/pipeline/state`);
+        const state = await stateRes.json();
+        const action = state.running ? 'pause' : 'resume';
+        const res = await fetch(`${API_BASE}/api/pipeline/${action}`, { method: 'POST' });
+        const result = await res.json();
+        updatePipelineUI(result.running);
+        loadTasks();
+    } catch (e) {
+        console.error('Failed to toggle pipeline', e);
+    }
+}
+
+function updatePipelineUI(running) {
+    const badge = document.getElementById('pipelineStateBadge');
+    const btnIcon = document.getElementById('btnPipelineIcon');
+    const btnText = document.getElementById('btnPipelineText');
+    if (badge) {
+        if (running) {
+            badge.style.background = '#dcfce7';
+            badge.style.color = '#15803d';
+            badge.innerHTML = '<span style="width:7px; height:7px; border-radius:50%; background:#16a34a; display:inline-block;"></span><span>调度运行中</span>';
+        } else {
+            badge.style.background = '#fee2e2';
+            badge.style.color = '#b91c1c';
+            badge.innerHTML = '<span style="width:7px; height:7px; border-radius:50%; background:#dc2626; display:inline-block;"></span><span>任务已暂停</span>';
+        }
+    }
+    if (btnIcon && btnText) {
+        if (running) {
+            btnIcon.textContent = '⏸';
+            btnText.textContent = '暂停任务';
+        } else {
+            btnIcon.textContent = '▶';
+            btnText.textContent = '启动任务';
+        }
     }
 }
 
@@ -500,10 +551,10 @@ function renderTaskList(tasks) {
     let html = '';
     tasks.forEach(task => {
         const isProcessing = ['processing', 'transcribing', 'downloading'].includes(task.status);
-        const isAudioReady = task.status === 'audio_ready';
         const isShort = (task.url && task.url.includes('/shorts/')) || (task.author === 'YouTube Shorts');
         const durText = escapeHtml(task.duration_str || '00:00');
-        const durationLabel = isShort ? `Shorts · ${durText}` : durText;
+        // Shorts 视频统一移除时长显示，仅显示 Shorts 标识；常规长视频显示真实时长
+        const durationLabel = isShort ? 'Shorts' : durText;
 
         let statusTag = `<span class="badge-tag tag-pending">⏳ 排队等待中</span>`;
         if (task.status === 'downloading') {
@@ -518,21 +569,6 @@ function renderTaskList(tasks) {
         const pct = (typeof task.progress_pct === 'number' && task.progress_pct > 0) ? task.progress_pct : (isProcessing ? 10 : 0);
         const costTime = task.cost_time_str ? `已耗时 ${task.cost_time_str}` : '刚刚加入';
 
-        let progressBarHtml = '';
-        if (isProcessing) {
-            progressBarHtml = `
-                <div class="progress-block" style="margin-top: 8px;">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                        <span><b>当前步骤:</b> ${escapeHtml(stepText)}</span>
-                        <span><b>${pct}%</b> <span style="font-size:10px; color:#92400e;">(${escapeHtml(costTime)})</span></span>
-                    </div>
-                    <div class="progress-bar-bg" style="height:6px; background:#fde68a;">
-                        <div class="progress-bar-val" style="width: ${pct}%; background:#d97706;"></div>
-                    </div>
-                </div>
-            `;
-        }
-
         html += `
             <div class="history-card" style="${isProcessing ? 'border-color:#f59e0b; background:#fffdfa;' : ''}">
                 <div class="result-thumb">
@@ -546,11 +582,31 @@ function renderTaskList(tasks) {
                         <span>•</span>
                         <span>观看于 ${escapeHtml(task.watched_at || '')}</span>
                     </div>
-                    <div style="margin-top:6px; display:flex; gap:8px; align-items:center;">
-                        ${statusTag}
-                        <span style="font-size:11px; color:#64748b;">${escapeHtml(costTime)}</span>
+
+                    <!-- 进度卡片垂直信息流：当前步骤、处理进度、累计耗时各自独占一行，绝不折行 -->
+                    <div class="task-info-block" style="margin-top: 8px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #475569;">
+                        <!-- 第 1 行：当前步骤 -->
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <span style="color: #64748b; font-size: 11px; flex-shrink: 0;">当前步骤：</span>
+                            ${statusTag}
+                            <span style="font-weight: 600; color: #1e293b;">${escapeHtml(stepText)}</span>
+                        </div>
+
+                        <!-- 第 2 行：处理进度 -->
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="color: #64748b; font-size: 11px; flex-shrink: 0;">处理进度：</span>
+                            <div class="progress-bar-bg" style="flex: 1; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden;">
+                                <div class="progress-bar-val" style="width: ${pct}%; height: 100%; background: ${isProcessing ? '#d97706' : '#94a3b8'}; transition: width 0.3s;"></div>
+                            </div>
+                            <span style="font-weight: 700; font-size: 11px; color: #334155; min-width: 32px; text-align: right;">${pct}%</span>
+                        </div>
+
+                        <!-- 第 3 行：累计耗时 -->
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <span style="color: #64748b; font-size: 11px; flex-shrink: 0;">累计耗时：</span>
+                            <span style="color: #64748b; font-family: monospace;">${escapeHtml(costTime)}</span>
+                        </div>
                     </div>
-                    ${progressBarHtml}
                 </div>
             </div>
         `;

@@ -525,7 +525,14 @@ def get_stats() -> Dict[str, Any]:
     
     cursor.execute("SELECT count(*) FROM video_subtitles;")
     total_segments = cursor.fetchone()[0]
-    
+
+    cursor.execute("SELECT count(*) FROM items WHERE status = 'ready' AND sub_source = 'native';")
+    native_count = cursor.fetchone()[0]
+    native_pct = round((native_count / ready * 100), 1) if ready > 0 else 0
+
+    cursor.execute("SELECT count(*) FROM items WHERE status = 'ready' AND sub_source = 'asr';")
+    asr_count = cursor.fetchone()[0]
+
     coverage_pct = round((ready / total * 100), 1) if total > 0 else 0
     
     conn.close()
@@ -535,6 +542,9 @@ def get_stats() -> Dict[str, Any]:
         "pending": pending,
         "processing": processing,
         "failed": 0,
+        "native_count": native_count,
+        "native_pct": native_pct,
+        "asr_count": asr_count,
         "total_segments": total_segments,
         "sub_coverage_pct": coverage_pct
     }
