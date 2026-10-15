@@ -122,10 +122,20 @@ def run_asr_job(item: Dict[str, Any]):
 
 
 async def download_worker():
-    """Worker 1: 专用音频下载与字幕提取，高 I/O 并发（内置 500MB 磁盘背压限流）"""
+    """Worker 1: 专用音频下载与字幕提取，高 I/O 并发（内置 500MB 磁盘背压限流与看门狗）"""
     logger.info("Download worker started")
+    last_watchdog_check = 0.0
+
     while True:
         try:
+            # 周期性看门狗：清理超过 5 分钟未更新的卡死/僵尸任务 (如异常退出或网络超时)
+            now = time.time()
+            if now - last_watchdog_check > 60:
+                last_watchdog_check = now
+                stale_cnt = database.clean_stale_tasks(stale_seconds=300)
+                if stale_cnt > 0:
+                    logger.info(f"[Watchdog] Recovered {stale_cnt} stale zombie tasks back to pending")
+
             if not pipeline_running:
                 await asyncio.sleep(2)
                 continue

@@ -80,11 +80,11 @@ def init_db():
     );
     """)
 
-    # 服务重启时，将异常中断的 processing 状态重置回 pending
+    # 服务重启时，将所有异常中断的中间状态 (processing, downloading, transcribing) 全部重置回 pending
     cursor.execute("""
     UPDATE items
     SET status = 'pending', current_step = NULL, progress_pct = 0
-    WHERE status = 'processing';
+    WHERE status IN ('processing', 'downloading', 'transcribing');
     """)
     
     conn.commit()
@@ -233,6 +233,22 @@ def get_next_audio_ready_item() -> Optional[Dict[str, Any]]:
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None
+
+def clean_stale_tasks(stale_seconds: int = 600) -> int:
+    """清理因意外中断、死锁或网络卡死导致长时间未更新的僵尸任务 (重置回 pending)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE items
+    SET status = 'pending', current_step = '超时重置排队', progress_pct = 0
+    WHERE status IN ('processing', 'downloading', 'transcribing')
+      AND (strftime('%s', 'now') - strftime('%s', updated_at)) > ?;
+    """, (stale_seconds,))
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
 
 def update_item_status(item_id: int, status: str, error_message: Optional[str] = None, sub_source: Optional[str] = None, progress_pct: Optional[int] = None, cost_time_sec: Optional[float] = None, current_step: Optional[str] = None):
     conn = get_connection()
