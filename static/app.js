@@ -192,6 +192,7 @@ function renderSearchResults(items, keyword) {
 
     let html = '';
     items.forEach((item, idx) => {
+        const isFirst = idx === 0;
         const isShort = (item.url && item.url.includes('/shorts/')) || (item.author === 'YouTube Shorts');
         const durText = escapeHtml(item.duration_str || formatSeconds(item.duration_sec));
         const durationLabel = isShort ? `Shorts · ${durText}` : durText;
@@ -455,19 +456,22 @@ async function loadTasks() {
         if (!res.ok) return;
         const data = await res.json();
 
-        // 1. 更新顶部总览指标
+        // 1. 更新顶部总览指标 (严格保证：已就绪数 + 排队数 = 视频总收录数)
         const sum = data.summary || {};
-        document.getElementById('statTotalVideos').textContent = sum.total_videos || 0;
-        document.getElementById('statProcessing').textContent = sum.processing || 0;
-        document.getElementById('statPending').textContent = sum.pending || 0;
-        document.getElementById('statReadyCoverage').textContent = `${sum.sub_coverage_pct || 0}%`;
-        document.getElementById('statReadySubCount').textContent = `已就绪 ${sum.ready || 0} 部 (共 ${sum.total_segments || 0} 句)`;
+        const totalVideos = sum.total_videos || 0;
+        const readyVideos = sum.ready || 0;
+        const pendingVideos = (sum.pending !== undefined) ? sum.pending : Math.max(0, totalVideos - readyVideos);
 
-        // 2. 更新侧边栏/底部 Tab 角标
-        const activeCount = (sum.processing || 0) + (sum.pending || 0);
+        document.getElementById('statTotalVideos').textContent = totalVideos;
+        document.getElementById('statProcessing').textContent = sum.processing || 0;
+        document.getElementById('statPending').textContent = pendingVideos;
+        document.getElementById('statReadyCoverage').textContent = `${sum.sub_coverage_pct || 0}%`;
+        document.getElementById('statReadySubCount').textContent = `已就绪 ${readyVideos} 部 (共 ${sum.total_segments || 0} 句)`;
+
+        // 2. 更新侧边栏/底部 Tab 角标 (展示排队待完成总量)
         const tasksBadge = document.getElementById('navTasksBadge');
         if (tasksBadge) {
-            tasksBadge.textContent = activeCount;
+            tasksBadge.textContent = pendingVideos;
             tasksBadge.classList.toggle('pulse', (sum.processing || 0) > 0);
         }
 

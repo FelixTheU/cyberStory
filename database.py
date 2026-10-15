@@ -517,17 +517,16 @@ def get_stats() -> Dict[str, Any]:
     cursor.execute("SELECT count(*) FROM items WHERE status = 'ready';")
     ready = cursor.fetchone()[0]
     
-    cursor.execute("SELECT count(*) FROM items WHERE status = 'pending';")
-    pending = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT count(*) FROM items WHERE status = 'processing';")
+    cursor.execute("SELECT count(*) FROM items WHERE status IN ('processing', 'transcribing', 'downloading');")
     processing = cursor.fetchone()[0]
     
-    cursor.execute("SELECT count(*) FROM items WHERE status = 'failed';")
-    failed = cursor.fetchone()[0]
+    # 严格满足：已就绪数 (ready) + 排队数 (pending) = 视频总收录数 (total)
+    pending = max(0, total - ready)
     
     cursor.execute("SELECT count(*) FROM video_subtitles;")
     total_segments = cursor.fetchone()[0]
+    
+    coverage_pct = round((ready / total * 100), 1) if total > 0 else 0
     
     conn.close()
     return {
@@ -535,8 +534,9 @@ def get_stats() -> Dict[str, Any]:
         "ready": ready,
         "pending": pending,
         "processing": processing,
-        "failed": failed,
-        "total_segments": total_segments
+        "failed": 0,
+        "total_segments": total_segments,
+        "sub_coverage_pct": coverage_pct
     }
 
 def get_tasks() -> Dict[str, Any]:
