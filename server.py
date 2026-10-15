@@ -76,8 +76,8 @@ def run_download_job(item: Dict[str, Any]):
         logger.info(f"[{source_id}] Audio downloaded in {cost:.1f}s, transitioning to audio_ready")
         database.update_item_status(item_id, status="audio_ready", current_step="音频就绪待转写", progress_pct=35, cost_time_sec=cost)
     else:
-        logger.warning(f"[{source_id}] Audio download failed, keeping as pending for retry")
-        database.update_item_status(item_id, status="pending", current_step="下载未成功(重试排队)", progress_pct=0, cost_time_sec=cost)
+        logger.warning(f"[{source_id}] Audio download failed")
+        database.update_item_status(item_id, status="failed", error_message="音频下载失败", cost_time_sec=cost)
 
 
 def run_asr_job(item: Dict[str, Any]):
@@ -104,11 +104,12 @@ def run_asr_job(item: Dict[str, Any]):
             logger.info(f"[{source_id}] ASR worker completed: {len(segments)} segments in {cost:.1f}s")
             database.save_subtitles_and_index(item_id, segments, "asr", cost_time_sec=cost)
         else:
-            logger.warning(f"[{source_id}] ASR produced no segments, re-queueing as pending")
-            database.update_item_status(item_id, status="pending", current_step="待重新识别", progress_pct=0, cost_time_sec=cost)
+            # 真实完成但无语音（如纯背景音乐/无口播视频）：正常收录为 ready(none)，避免无限死循环重新拉取
+            logger.info(f"[{source_id}] ASR completed (no speech detected in audio), indexing title")
+            database.save_subtitles_and_index(item_id, [], "none", cost_time_sec=cost)
     except Exception as e:
         logger.error(f"[{source_id}] ASR worker failed: {e}")
-        database.update_item_status(item_id, status="pending", current_step="识别异常(等待重试)", progress_pct=0, error_message=str(e))
+        database.update_item_status(item_id, status="failed", error_message=str(e))
     finally:
         # 确保音频文件被彻底删除
         try:
@@ -276,7 +277,7 @@ async def sync_youtube(req: SyncRequest):
     return {"success": True, **result}
 
 @app.get("/api/search")
-async def search_api(
+def search_api(
     q: str = Query(..., min_length=1, description="搜索关键词"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -286,17 +287,17 @@ async def search_api(
     return result
 
 @app.get("/api/items/{item_id}/subtitles")
-async def item_subtitles(item_id: int):
+def item_subtitles(item_id: int):
     subtitles = database.get_item_subtitles(item_id)
     return {"item_id": item_id, "subtitles": subtitles}
 
 @app.get("/api/history")
-async def history_feed():
+def history_feed():
     """获取按日期分组的历史记录列表，包含状态、进度与耗时"""
     return database.get_history_feed()
 
 @app.get("/api/tasks")
-async def tasks_api():
+def tasks_api():
     """获取任务管理数据：总体概览统计，进行中与排队中任务列表"""
     data = database.get_tasks()
     data["pipeline_running"] = pipeline_running

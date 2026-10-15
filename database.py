@@ -391,26 +391,28 @@ def search(query: str, page: int = 1, page_size: int = 20, source: Optional[str]
         except Exception:
             results = []
 
-    # 若 FTS5 无结果或 query < 3 字符，使用模糊匹配
+    # 若 FTS5 无结果或 query < 3 字符，使用高效子查询进行模糊匹配 (避免笛卡尔积扫描)
     if not results:
         like_expr = f"%{query}%"
         if source_filter:
             cursor.execute("""
-            SELECT DISTINCT i.ts_id, i.ts_id AS id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+            SELECT i.ts_id, i.ts_id AS id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
                    i.thumbnail_url, i.watched_at, i.sub_source
             FROM items i
-            LEFT JOIN video_subtitles vs ON vs.item_id = i.ts_id
-            WHERE (i.title LIKE ? OR i.author LIKE ? OR vs.text LIKE ?) AND i.source = ?
+            WHERE (i.title LIKE ? OR i.author LIKE ? OR i.ts_id IN (
+                SELECT DISTINCT item_id FROM video_subtitles WHERE text LIKE ?
+            )) AND i.source = ?
             ORDER BY i.ts_id DESC
             LIMIT ? OFFSET ?;
             """, (like_expr, like_expr, like_expr, source_filter, page_size, offset))
         else:
             cursor.execute("""
-            SELECT DISTINCT i.ts_id, i.ts_id AS id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
+            SELECT i.ts_id, i.ts_id AS id, i.source, i.source_id, i.title, i.author, i.url, i.duration_sec,
                    i.thumbnail_url, i.watched_at, i.sub_source
             FROM items i
-            LEFT JOIN video_subtitles vs ON vs.item_id = i.ts_id
-            WHERE i.title LIKE ? OR i.author LIKE ? OR vs.text LIKE ?
+            WHERE i.title LIKE ? OR i.author LIKE ? OR i.ts_id IN (
+                SELECT DISTINCT item_id FROM video_subtitles WHERE text LIKE ?
+            )
             ORDER BY i.ts_id DESC
             LIMIT ? OFFSET ?;
             """, (like_expr, like_expr, like_expr, page_size, offset))

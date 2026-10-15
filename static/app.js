@@ -119,6 +119,8 @@ function switchMainTab(tabId) {
 
     if (tabId === 'tasks') {
         loadTasks();
+    } else if (tabId === 'youtube') {
+        loadYtHistory(true);
     }
 }
 
@@ -139,7 +141,7 @@ function initSearchEvents() {
     const input = document.getElementById('searchInput');
     if (input) {
         input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') doSearch();
+            if (e.key === 'Enter' && !e.isComposing) doSearch();
         });
     }
 }
@@ -278,7 +280,11 @@ async function selectSearchResultItem(itemId, startSec, keyword, openMobile = tr
 }
 
 // ─── 4. YouTube 历史流水模块 (支持日期折叠) ───
-async function loadYtHistory() {
+async function loadYtHistory(force = false) {
+    // 性能保护：仅当处于 YouTube 标签页或首屏尚未加载过时才请求并重绘，避免在搜索页持续被长列表重绘抢占主线程
+    if (!force && currentTab !== 'youtube' && document.querySelectorAll('#ytHistoryFeed .history-card').length > 0) {
+        return;
+    }
     try {
         const res = await fetch(`${API_BASE}/api/history`);
         if (!res.ok) return;
@@ -657,8 +663,11 @@ function renderTimelineRows(segments, containerId, highlightSec = null, keyword 
         let lineText = escapeHtml(seg.text);
         if (keyword && lineText.toLowerCase().includes(keyword.toLowerCase())) {
             isHigh = true;
-            const reg = new RegExp(keyword, 'gi');
-            lineText = lineText.replace(reg, m => `<mark style="background:#fef08a; padding:1px 3px;">${m}</mark>`);
+            try {
+                const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const reg = new RegExp(escaped, 'gi');
+                lineText = lineText.replace(reg, m => `<mark style="background:#fef08a; padding:1px 3px;">${m}</mark>`);
+            } catch (e) {}
         }
 
         html += `
