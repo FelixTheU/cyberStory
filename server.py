@@ -98,7 +98,8 @@ def run_asr_job(item: Dict[str, Any]):
     database.update_item_status(item_id, status="transcribing", current_step="Whisper模型加载", progress_pct=40)
 
     try:
-        segments = transcribe_audio_file(audio_path, source_id, item_id=item_id, t0=t0)
+        title = item.get("title", "")
+        segments = transcribe_audio_file(audio_path, source_id, item_id=item_id, t0=t0, title=title)
         cost = time.time() - t0
         if segments:
             logger.info(f"[{source_id}] ASR worker completed: {len(segments)} segments in {cost:.1f}s")
