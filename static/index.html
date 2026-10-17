@@ -1199,23 +1199,33 @@
                                 </div>
                             </div>
 
-                            <!-- 3. Whisper 模型规格 -->
+                            <!-- 3. Whisper 模型规格与自动下载 -->
                             <div class="settings-form-row">
                                 <div class="settings-label">
-                                    Whisper 模型规格
-                                    <small>语音识别模型大小</small>
+                                    Whisper 模型管理
+                                    <small>本地就绪与自动下载</small>
                                 </div>
                                 <div class="settings-control">
-                                    <select class="settings-select" id="cfgWhisperModel">
-                                        <option value="tiny">tiny (极速 / 内存开销 ~150MB)</option>
-                                        <option value="base">base (轻量 / 内存开销 ~250MB)</option>
-                                        <option value="small">small (推荐 / 准确率与速度最佳平衡 / 内存 ~460MB)</option>
-                                        <option value="medium">medium (高精 / 内存开销 ~1.5GB)</option>
-                                        <option value="large-v3-turbo">large-v3-turbo (旗舰高精 / 内存开销 ~2.5GB)</option>
-                                    </select>
-                                    <span class="settings-help">目前默认采用 <strong>small</strong> 规格（离线权重已缓存在本地，开箱即用）。</span>
+                                    <div style="display:flex; align-items:center; gap:10px; max-width:480px;">
+                                        <select class="settings-select" id="cfgWhisperModel" onchange="onModelSelectChanged()" style="flex:1;">
+                                            <option value="tiny">tiny (极速 / ~75MB)</option>
+                                            <option value="base">base (轻量 / ~145MB)</option>
+                                            <option value="small">small (推荐 / ~464MB)</option>
+                                            <option value="medium">medium (高精 / ~1.5GB)</option>
+                                            <option value="large-v3-turbo">large-v3-turbo (旗舰高精 / ~1.6GB)</option>
+                                        </select>
+                                        <span id="cfgModelReadyBadge" style="font-size:12px; font-weight:600; padding:4px 10px; border-radius:12px; white-space:nowrap;"></span>
+                                    </div>
+                                    <span class="settings-help">系统支持自动检测与自动下载 Whisper 模型权重。若选择的新模型本地尚未就绪，可直接点击下方的「⬇️ 自动下载」在后台自动拉取；运行中若模型缺失，后台调度器亦会自愈双线路自动下载。</span>
+
+                                    <!-- 支持的所有模型就绪状态与一键自动下载列表 -->
+                                    <div style="margin-top:8px; max-width:640px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:10px 14px; display:flex; flex-direction:column; gap:8px;" id="modelsListContainer">
+                                        <div style="font-size:12px; color:#64748b;">正在查询本地模型缓存...</div>
+                                    </div>
+                                    <div id="modelDownloadBanner" style="display:none; max-width:640px; padding:8px 12px; border-radius:6px; font-size:12px; margin-top:4px;"></div>
                                 </div>
                             </div>
+
 
                             <!-- 4. 音频缓存大小 -->
                             <div class="settings-form-row">

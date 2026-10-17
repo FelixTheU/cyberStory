@@ -5,9 +5,11 @@ import asyncio
 import logging
 import time
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
 from pathlib import Path
+
 
 from fastapi import FastAPI, Query, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
@@ -42,6 +44,19 @@ class SettingsUpdate(BaseModel):
     max_audio_cache_mb: Optional[int] = None
     proxy_url: Optional[str] = None
     whisper_model: Optional[str] = None
+
+class ModelDownloadRequest(BaseModel):
+    model: str
+
+model_download_lock = threading.Lock()
+model_download_state: Dict[str, Any] = {
+    "status": "idle",
+    "model": None,
+    "message": "",
+    "started_at": 0,
+    "cost_sec": 0
+}
+
 
 
 # --- Background Multi-Workers (解耦音频下载 worker 与 ASR worker) ---
@@ -401,7 +416,78 @@ def update_settings(req: SettingsUpdate):
     logger.info(f"Settings updated: {updates}")
     return {"success": True, "message": "配置已保存并即时生效", "updated": updates}
 
+@app.get("/api/models/status")
+def models_status_api():
+    """获取所有支持的 Whisper 模型本地缓存与就绪状态"""
+    from pipeline import get_local_models_info
+    models_info = get_local_models_info()
+    return {
+        "current_model": getattr(config, "WHISPER_MODEL", "small"),
+        "download_state": model_download_state,
+        "models": models_info
+    }
+
+def _bg_download_model(model_name: str):
+    global model_download_state
+    from pipeline import download_whisper_model, reset_whisper_model
+    t0 = time.time()
+    try:
+        download_whisper_model(model_name)
+        cost = round(time.time() - t0, 1)
+        model_download_state = {
+            "status": "completed",
+            "model": model_name,
+            "message": f"模型 [{model_name}] 已成功下载完成并就绪 (耗时 {cost}s)",
+            "started_at": t0,
+            "cost_sec": cost
+        }
+        reset_whisper_model()
+        logger.info(f"Model [{model_name}] downloaded successfully in {cost}s")
+    except Exception as e:
+        cost = round(time.time() - t0, 1)
+        model_download_state = {
+            "status": "failed",
+            "model": model_name,
+            "message": f"下载失败: {str(e)}",
+            "started_at": t0,
+            "cost_sec": cost
+        }
+        logger.error(f"Model [{model_name}] download failed: {e}")
+
+@app.post("/api/models/download")
+def download_model_api(req: ModelDownloadRequest):
+    """自动触发指定 Whisper 模型的后台异步下载与校验"""
+    global model_download_state
+    model_name = req.model.strip()
+    from pipeline import MODEL_DESCRIPTIONS
+    if model_name not in MODEL_DESCRIPTIONS:
+        raise HTTPException(status_code=400, detail=f"不支持的模型规格: {model_name}")
+
+    with model_download_lock:
+        if model_download_state["status"] == "downloading":
+            return {
+                "success": False,
+                "message": f"当前正在下载模型 [{model_download_state['model']}]，请稍候...",
+                "state": model_download_state
+            }
+
+        model_download_state = {
+            "status": "downloading",
+            "model": model_name,
+            "message": f"正在从 HuggingFace 自动下载 [{model_name}] 模型权重中...",
+            "started_at": time.time(),
+            "cost_sec": 0
+        }
+
+    threading.Thread(target=_bg_download_model, args=(model_name,), daemon=True).start()
+    return {
+        "success": True,
+        "message": f"已触发 [{model_name}] 自动下载任务",
+        "state": model_download_state
+    }
+
 @app.get("/api/settings/export")
+
 def export_archive():
     import tarfile
     from datetime import datetime

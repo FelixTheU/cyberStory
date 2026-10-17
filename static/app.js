@@ -782,11 +782,151 @@ async function loadSettings() {
         if (exportSummary) {
             exportSummary.innerHTML = `当前主数据库: <strong>${data.db_size_mb} MB</strong> | 包含 <strong>${data.total_items}</strong> 部视频与 <strong>${Number(data.total_subtitles).toLocaleString()}</strong> 句全文索引`;
         }
+
+        // 加载模型列表与自动下载状态
+        loadModelsStatus();
     } catch (e) {
         console.error('loadSettings error:', e);
         if (overviewEl) overviewEl.textContent = '加载设置失败，请检查服务连接';
     }
 }
+
+// ─── 模型状态与自动下载控制 ───
+let localModelsData = {};
+let modelDownloadPollTimer = null;
+
+async function loadModelsStatus() {
+    try {
+        const res = await fetch(`${API_BASE}/api/models/status`);
+        if (!res.ok) return;
+        const data = await res.json();
+        localModelsData = data.models || {};
+        renderModelsList(data.models, data.current_model, data.download_state);
+        updateModelBadge(data.current_model);
+
+        // 如果正在下载，开启轮询
+        if (data.download_state && data.download_state.status === 'downloading') {
+            if (!modelDownloadPollTimer) {
+                modelDownloadPollTimer = setInterval(loadModelsStatus, 2000);
+            }
+        } else {
+            if (modelDownloadPollTimer) {
+                clearInterval(modelDownloadPollTimer);
+                modelDownloadPollTimer = null;
+            }
+        }
+    } catch (e) {
+        console.error('loadModelsStatus error:', e);
+    }
+}
+
+function updateModelBadge(modelName) {
+    const badge = document.getElementById('cfgModelReadyBadge');
+    if (!badge) return;
+    const info = localModelsData[modelName];
+    if (info && info.downloaded) {
+        badge.style.background = '#dcfce7';
+        badge.style.color = '#15803d';
+        badge.textContent = `✅ 已就绪 (${info.size_mb} MB)`;
+    } else {
+        badge.style.background = '#fee2e2';
+        badge.style.color = '#b91c1c';
+        badge.textContent = '⬇️ 本地未下载';
+    }
+}
+
+function onModelSelectChanged() {
+    const sel = document.getElementById('cfgWhisperModel');
+    if (sel) updateModelBadge(sel.value);
+}
+
+function renderModelsList(models, currentModel, downloadState) {
+    const container = document.getElementById('modelsListContainer');
+    if (!container) return;
+
+    const banner = document.getElementById('modelDownloadBanner');
+    if (banner && downloadState) {
+        if (downloadState.status === 'downloading') {
+            banner.style.display = 'block';
+            banner.style.background = '#eff6ff';
+            banner.style.color = '#1d4ed8';
+            banner.style.border = '1px solid #bfdbfe';
+            banner.innerHTML = `<span style="display:inline-block; margin-right:6px;">⏳</span><strong>${escapeHtml(downloadState.message || '正在自动下载模型中...')}</strong>`;
+        } else if (downloadState.status === 'completed') {
+            banner.style.display = 'block';
+            banner.style.background = '#dcfce7';
+            banner.style.color = '#15803d';
+            banner.style.border = '1px solid #bbf7d0';
+            banner.innerHTML = `<strong>🎉 ${escapeHtml(downloadState.message)}</strong>`;
+        } else if (downloadState.status === 'failed') {
+            banner.style.display = 'block';
+            banner.style.background = '#fee2e2';
+            banner.style.color = '#b91c1c';
+            banner.style.border = '1px solid #fecaca';
+            banner.innerHTML = `<strong>❌ ${escapeHtml(downloadState.message)}</strong>`;
+        } else {
+            banner.style.display = 'none';
+        }
+    }
+
+    let html = '';
+    const isDownloading = downloadState && downloadState.status === 'downloading';
+
+    for (const [key, item] of Object.entries(models)) {
+        const isCurrent = key === currentModel;
+        const isThisDownloading = isDownloading && downloadState.model === key;
+
+        html += `
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px dashed #e2e8f0; font-size:12px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-weight:700; color:#0f172a; min-width:85px;">${key}</span>
+                <span style="color:#64748b;">${item.desc}</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:10px;">
+                ${item.downloaded 
+                    ? `<span style="color:#16a34a; font-weight:600;">✅ 已就绪 (${item.size_mb} MB)</span>`
+                    : `<span style="color:#94a3b8;">未下载</span>`
+                }
+                ${isThisDownloading
+                    ? `<span style="color:#2563eb; font-weight:600;">正在下载中...</span>`
+                    : (!item.downloaded 
+                        ? `<button onclick=\"triggerModelDownload('${key}')\" ${isDownloading ? 'disabled' : ''} style=\"padding:3px 10px; font-size:11px; font-weight:600; border-radius:6px; border:1px solid #2563eb; background:#eff6ff; color:#2563eb; cursor:pointer;\">⬇️ 自动下载</button>`
+                        : (isCurrent 
+                            ? `<span style=\"color:#64748b; font-size:11px; padding:3px 8px; background:#f1f5f9; border-radius:6px;\">当前使用</span>`
+                            : `<button onclick=\"switchAndUseModel('${key}')\" style=\"padding:3px 8px; font-size:11px; border-radius:6px; border:1px solid #cbd5e1; background:#ffffff; color:#334155; cursor:pointer;\">启用此模型</button>`
+                          )
+                      )
+                }
+            </div>
+        </div>`;
+    }
+    container.innerHTML = html;
+}
+
+async function triggerModelDownload(modelName) {
+    try {
+        const res = await fetch(`${API_BASE}/api/models/download`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: modelName })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || data.message || '触发自动下载失败');
+        loadModelsStatus();
+    } catch (e) {
+        alert('触发自动下载失败: ' + e.message);
+    }
+}
+
+function switchAndUseModel(modelName) {
+    const sel = document.getElementById('cfgWhisperModel');
+    if (sel) {
+        sel.value = modelName;
+        updateModelBadge(modelName);
+    }
+    saveSettings();
+}
+
 
 async function saveSettings() {
     const btn = document.getElementById('btnSaveConfig');

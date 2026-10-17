@@ -152,8 +152,64 @@ def parse_vtt(vtt_path: Path) -> List[Dict[str, Any]]:
 _WHISPER_MODEL_INSTANCE = None
 _WHISPER_LOCK = None
 
+MODEL_DESCRIPTIONS = {
+    "tiny": "极速 / 内存开销 ~150MB / 适合轻量快速测试",
+    "base": "轻量 / 内存开销 ~250MB / 速度快",
+    "small": "推荐 / 准确率与速度最佳平衡 / 内存 ~460MB",
+    "medium": "高精 / 内存开销 ~1.5GB / 适合长专业文史解说",
+    "large-v3-turbo": "旗舰高精 / 内存 ~2.5GB / 官方最新最准模型"
+}
+
+def ensure_huggingface_env():
+    """配置 HuggingFace 下载环境变量，确保走本地代理与抑制 Windows symlink 提示"""
+    if getattr(config, "PROXY_URL", None):
+        os.environ["HTTP_PROXY"] = config.PROXY_URL
+        os.environ["HTTPS_PROXY"] = config.PROXY_URL
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+def get_local_models_info() -> Dict[str, Any]:
+    """检查本地 HuggingFace 缓存中的 Whisper 模型就绪状况与文件大小"""
+    hub_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    result = {}
+    for m, desc in MODEL_DESCRIPTIONS.items():
+        folder_name = f"models--Systran--faster-whisper-{m}"
+        model_dir = hub_dir / folder_name
+        if model_dir.exists():
+            files = list(model_dir.rglob("*.bin")) + list(model_dir.rglob("*.safetensors"))
+            size_mb = sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file()) / (1024 * 1024)
+            result[m] = {
+                "downloaded": len(files) > 0,
+                "size_mb": round(size_mb, 1),
+                "desc": desc,
+                "path": str(model_dir) if len(files) > 0 else None
+            }
+        else:
+            result[m] = {
+                "downloaded": False,
+                "size_mb": 0,
+                "desc": desc,
+                "path": None
+            }
+    return result
+
+def download_whisper_model(model_name: str) -> str:
+    """自动下载指定的 Whisper 模型，带主线路与国内镜像双重保底"""
+    ensure_huggingface_env()
+    import faster_whisper
+    logger.info(f"Starting auto-download for Whisper model '{model_name}'...")
+    try:
+        model_path = faster_whisper.download_model(model_name)
+        logger.info(f"Model '{model_name}' downloaded successfully to: {model_path}")
+        return model_path
+    except Exception as e:
+        logger.warning(f"Primary route failed for '{model_name}': {e}. Retrying with hf-mirror...")
+        os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+        model_path = faster_whisper.download_model(model_name)
+        logger.info(f"Model '{model_name}' downloaded via mirror to: {model_path}")
+        return model_path
+
 def get_whisper_model():
-    """获取进程级常驻 WhisperModel 单例实例"""
+    """获取进程级常驻 WhisperModel 单例实例，若本地缺失则全自动下载"""
     global _WHISPER_MODEL_INSTANCE, _WHISPER_LOCK
     if _WHISPER_LOCK is None:
         import threading
@@ -162,15 +218,27 @@ def get_whisper_model():
     if _WHISPER_MODEL_INSTANCE is None:
         with _WHISPER_LOCK:
             if _WHISPER_MODEL_INSTANCE is None:
+                ensure_huggingface_env()
                 from faster_whisper import WhisperModel
                 logger.info(f"Initializing global WhisperModel instance ({config.WHISPER_MODEL}, {config.WHISPER_COMPUTE_TYPE}, threads={getattr(config, 'WHISPER_CPU_THREADS', 2)})...")
-                _WHISPER_MODEL_INSTANCE = WhisperModel(
-                    config.WHISPER_MODEL,
-                    device=config.WHISPER_DEVICE,
-                    compute_type=config.WHISPER_COMPUTE_TYPE,
-                    cpu_threads=getattr(config, "WHISPER_CPU_THREADS", 2),
-                    num_workers=1
-                )
+                try:
+                    _WHISPER_MODEL_INSTANCE = WhisperModel(
+                        config.WHISPER_MODEL,
+                        device=config.WHISPER_DEVICE,
+                        compute_type=config.WHISPER_COMPUTE_TYPE,
+                        cpu_threads=getattr(config, "WHISPER_CPU_THREADS", 2),
+                        num_workers=1
+                    )
+                except Exception as e:
+                    logger.warning(f"WhisperModel initialization failed via primary route: {e}. Retrying with auto-download mirror...")
+                    download_whisper_model(config.WHISPER_MODEL)
+                    _WHISPER_MODEL_INSTANCE = WhisperModel(
+                        config.WHISPER_MODEL,
+                        device=config.WHISPER_DEVICE,
+                        compute_type=config.WHISPER_COMPUTE_TYPE,
+                        cpu_threads=getattr(config, "WHISPER_CPU_THREADS", 2),
+                        num_workers=1
+                    )
                 logger.info("Global WhisperModel instance loaded and resident in memory.")
     return _WHISPER_MODEL_INSTANCE
 
@@ -180,6 +248,7 @@ def reset_whisper_model():
     global _WHISPER_MODEL_INSTANCE
     _WHISPER_MODEL_INSTANCE = None
     logger.info("WhisperModel instance reset for reconfiguration.")
+
 
 
 
