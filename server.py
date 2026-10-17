@@ -4,15 +4,17 @@ CyberHistoryExplorer — FastAPI 主入口与路由服务
 import asyncio
 import logging
 import time
+import os
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 
 import database
 import config
@@ -34,6 +36,13 @@ class VideoMeta(BaseModel):
 
 class SyncRequest(BaseModel):
     items: List[VideoMeta]
+
+class SettingsUpdate(BaseModel):
+    whisper_cpu_threads: Optional[int] = None
+    max_audio_cache_mb: Optional[int] = None
+    proxy_url: Optional[str] = None
+    whisper_model: Optional[str] = None
+
 
 # --- Background Multi-Workers (解耦音频下载 worker 与 ASR worker) ---
 
@@ -336,6 +345,203 @@ async def pipeline_resume():
 async def status():
     stats = database.get_stats()
     return stats
+
+# --- Settings & Data Migration ---
+
+@app.get("/api/settings")
+def get_settings():
+    total_items = 0
+    total_subs = 0
+    try:
+        stats = database.get_stats()
+        total_items = stats.get("total_videos", 0)
+        conn = database.get_connection()
+        total_subs = conn.execute("SELECT count(*) FROM video_subtitles").fetchone()[0]
+        conn.close()
+    except Exception:
+        pass
+
+
+    return {
+        "whisper_cpu_threads": getattr(config, "WHISPER_CPU_THREADS", 2),
+        "max_audio_cache_mb": getattr(config, "MAX_AUDIO_CACHE_MB", 500),
+        "proxy_url": getattr(config, "PROXY_URL", ""),
+        "ytdlp_bin": str(getattr(config, "YT_DLP_BIN", "yt-dlp")),
+        "whisper_model": getattr(config, "WHISPER_MODEL", "small"),
+        "whisper_device": getattr(config, "WHISPER_DEVICE", "cpu"),
+        "whisper_compute_type": getattr(config, "WHISPER_COMPUTE_TYPE", "int8"),
+        "cpu_count": os.cpu_count() or 4,
+        "current_audio_cache_mb": round(database.get_audio_cache_bytes() / (1024 * 1024), 1),
+        "db_size_mb": round(config.DB_PATH.stat().st_size / (1024 * 1024), 2) if config.DB_PATH.exists() else 0,
+        "total_items": total_items,
+        "total_subtitles": total_subs,
+        "pipeline_running": pipeline_running
+    }
+
+@app.post("/api/settings")
+def update_settings(req: SettingsUpdate):
+    updates = {}
+    if req.whisper_cpu_threads is not None:
+        updates["WHISPER_CPU_THREADS"] = max(1, min(16, req.whisper_cpu_threads))
+    if req.max_audio_cache_mb is not None:
+        updates["MAX_AUDIO_CACHE_MB"] = max(50, min(50000, req.max_audio_cache_mb))
+    if req.proxy_url is not None:
+        updates["PROXY_URL"] = req.proxy_url.strip()
+    if req.whisper_model is not None and req.whisper_model.strip():
+        updates["WHISPER_MODEL"] = req.whisper_model.strip()
+
+    # 保存到 config.py 并应用
+    config.save_config(updates)
+
+    # 若调整了 ASR 线程或模型，重置 WhisperModel 实例以应用新参数
+    if "WHISPER_CPU_THREADS" in updates or "WHISPER_MODEL" in updates:
+        from pipeline import reset_whisper_model
+        reset_whisper_model()
+
+    logger.info(f"Settings updated: {updates}")
+    return {"success": True, "message": "配置已保存并即时生效", "updated": updates}
+
+@app.get("/api/settings/export")
+def export_archive():
+    import tarfile
+    from datetime import datetime
+    import sqlite3
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    temp_backup_db = config.TEMP_DIR / f"cyber_history_export_{timestamp}.db"
+
+    try:
+        if config.DB_PATH.exists():
+            src = sqlite3.connect(str(config.DB_PATH))
+            dst = sqlite3.connect(str(temp_backup_db))
+            src.backup(dst)
+            dst.close()
+            src.close()
+            logger.info(f"Database backed up cleanly for export: {temp_backup_db}")
+        else:
+            raise HTTPException(status_code=404, detail="Database file not found")
+
+        tar_filename = f"cyberstory_migration_{timestamp}.tar.gz"
+        tar_path = config.TEMP_DIR / tar_filename
+
+        with tarfile.open(tar_path, "w:gz") as tar:
+            tar.add(temp_backup_db, arcname="cyber_history.db")
+
+            cookie_file = config.DATA_DIR / "youtube_cookies.txt"
+            if cookie_file.exists():
+                tar.add(cookie_file, arcname="youtube_cookies.txt")
+
+            config_file = config.BASE_DIR / "config.py"
+            if config_file.exists():
+                tar.add(config_file, arcname="config.py")
+
+            migrate_file = config.BASE_DIR / "migrate.md"
+            if migrate_file.exists():
+                tar.add(migrate_file, arcname="migrate.md")
+
+        logger.info(f"Created tar.gz archive: {tar_path} ({tar_path.stat().st_size} bytes)")
+    finally:
+        if temp_backup_db.exists():
+            temp_backup_db.unlink(missing_ok=True)
+
+    return FileResponse(
+        str(tar_path),
+        media_type="application/gzip",
+        filename=tar_filename
+    )
+
+@app.post("/api/settings/import")
+async def import_archive(file: UploadFile = File(...)):
+    import tarfile
+    import shutil
+    from datetime import datetime
+
+    if not (file.filename.endswith(".tar.gz") or file.filename.endswith(".tgz")):
+        raise HTTPException(status_code=400, detail="只支持上传 .tar.gz 或 .tgz 压缩包")
+
+    global pipeline_running
+    prev_pipeline_state = pipeline_running
+    pipeline_running = False  # 暂停任务调度
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    upload_tmp = config.TEMP_DIR / f"upload_{timestamp}.tar.gz"
+    extract_dir = config.TEMP_DIR / f"extract_{timestamp}"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # 保存上传的文件
+        with open(upload_tmp, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
+
+        # 解压
+        with tarfile.open(upload_tmp, "r:gz") as tar:
+            names = tar.getnames()
+            clean_names = [Path(n).name for n in names]
+            if "cyber_history.db" not in clean_names:
+                raise HTTPException(status_code=400, detail="压缩包内未找到核心数据库 cyber_history.db")
+            tar.extractall(extract_dir)
+
+        # 寻找解压出的文件
+        extracted_db = None
+        extracted_cookies = None
+        for p in extract_dir.rglob("*"):
+            if p.is_file():
+                if p.name == "cyber_history.db":
+                    extracted_db = p
+                elif p.name == "youtube_cookies.txt":
+                    extracted_cookies = p
+
+        if not extracted_db or not extracted_db.exists():
+            raise HTTPException(status_code=400, detail="未找到有效的 cyber_history.db 文件")
+
+        # 备份当前数据库
+        if config.DB_PATH.exists():
+            bak_path = config.DATA_DIR / f"cyber_history_{timestamp}.db.bak"
+            shutil.copy2(config.DB_PATH, bak_path)
+            logger.info(f"Current database backed up to {bak_path}")
+
+        # 清理旧 WAL 和 SHM
+        wal_file = config.DATA_DIR / "cyber_history.db-wal"
+        shm_file = config.DATA_DIR / "cyber_history.db-shm"
+        if wal_file.exists():
+            wal_file.unlink(missing_ok=True)
+        if shm_file.exists():
+            shm_file.unlink(missing_ok=True)
+
+        # 替换主库
+        shutil.copy2(extracted_db, config.DB_PATH)
+        logger.info("Restored cyber_history.db from import package")
+
+        # 替换 Cookies
+        if extracted_cookies and extracted_cookies.exists():
+            target_cookies = config.DATA_DIR / "youtube_cookies.txt"
+            shutil.copy2(extracted_cookies, target_cookies)
+            logger.info("Restored youtube_cookies.txt from import package")
+
+        # 重新初始化数据库连接与检查完整性
+        database.init_db()
+        stats = database.get_tasks()
+
+        return {
+            "success": True,
+            "message": "数据包还原成功！数据库与认证凭据已就绪",
+            "total_items": stats.get("total_items", 0),
+            "ready_items": stats.get("ready_items", 0),
+            "db_size_mb": round(config.DB_PATH.stat().st_size / (1024 * 1024), 2)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Import archive failed: {e}")
+        raise HTTPException(status_code=500, detail=f"导入恢复失败: {str(e)}")
+    finally:
+        pipeline_running = prev_pipeline_state
+        if upload_tmp.exists():
+            upload_tmp.unlink(missing_ok=True)
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir, ignore_errors=True)
+
 
 # --- Entry Point ---
 

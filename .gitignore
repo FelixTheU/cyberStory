@@ -26,6 +26,10 @@ temp/
 
 # Backup folder
 bak/
+*.zip
+*.tar.gz
+*.tgz
+
 
 # Logs
 *.log

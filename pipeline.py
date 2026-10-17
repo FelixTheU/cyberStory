@@ -175,6 +175,14 @@ def get_whisper_model():
     return _WHISPER_MODEL_INSTANCE
 
 
+def reset_whisper_model():
+    """重置 Whisper 模型单例，下次调用时使用新线程/模型参数重新初始化"""
+    global _WHISPER_MODEL_INSTANCE
+    _WHISPER_MODEL_INSTANCE = None
+    logger.info("WhisperModel instance reset for reconfiguration.")
+
+
+
 def download_audio_file(video_id: str, item_id: int = 0, t0: float = 0.0) -> Optional[Path]:
     """下载阶段：拉取 16kHz 单声道轻量音频，不截断。缩减 70% 下载体积并消除 Whisper 重采样开销"""
     audio_dir = config.TEMP_DIR / "audio"

@@ -38,3 +38,42 @@ MAX_ASR_DURATION_SEC = 0
 MAX_AUDIO_CACHE_MB = int(os.environ.get("CYBER_MAX_AUDIO_CACHE_MB", "500"))
 
 
+def save_config(updates: dict):
+    """更新内存中的配置变量并持久化写回 config.py 文件"""
+    import re
+    for k, v in updates.items():
+        globals()[k] = v
+
+    config_file = BASE_DIR / "config.py"
+    if not config_file.exists():
+        return
+    text = config_file.read_text(encoding="utf-8")
+
+    if "WHISPER_CPU_THREADS" in updates:
+        text = re.sub(
+            r'WHISPER_CPU_THREADS\s*=\s*int\(os\.environ\.get\([^,]+,\s*"[^"]*"\)\)',
+            f'WHISPER_CPU_THREADS = int(os.environ.get("CYBER_WHISPER_THREADS", "{updates["WHISPER_CPU_THREADS"]}"))',
+            text
+        )
+    if "MAX_AUDIO_CACHE_MB" in updates:
+        text = re.sub(
+            r'MAX_AUDIO_CACHE_MB\s*=\s*int\(os\.environ\.get\([^,]+,\s*"[^"]*"\)\)',
+            f'MAX_AUDIO_CACHE_MB = int(os.environ.get("CYBER_MAX_AUDIO_CACHE_MB", "{updates["MAX_AUDIO_CACHE_MB"]}"))',
+            text
+        )
+    if "PROXY_URL" in updates:
+        text = re.sub(
+            r'PROXY_URL\s*=\s*os\.environ\.get\([^,]+,\s*"[^"]*"\)',
+            f'PROXY_URL = os.environ.get("CYBER_PROXY", "{updates["PROXY_URL"]}")',
+            text
+        )
+    if "WHISPER_MODEL" in updates:
+        text = re.sub(
+            r'WHISPER_MODEL\s*=\s*os\.environ\.get\([^,]+,\s*"[^"]*"\)',
+            f'WHISPER_MODEL = os.environ.get("CYBER_WHISPER_MODEL", "{updates["WHISPER_MODEL"]}")',
+            text
+        )
+    config_file.write_text(text, encoding="utf-8")
+
+
+

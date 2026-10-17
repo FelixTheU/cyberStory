@@ -93,7 +93,7 @@ document.addEventListener('click', (e) => {
 // ─── 2. 视图 Tab 切换 ───
 function switchMainTab(tabId) {
     currentTab = tabId;
-    const tabs = ['search', 'youtube', 'zhihu', 'tasks'];
+    const tabs = ['search', 'youtube', 'zhihu', 'tasks', 'settings'];
 
     // 桌面侧边栏
     tabs.forEach(t => {
@@ -121,8 +121,11 @@ function switchMainTab(tabId) {
         loadTasks();
     } else if (tabId === 'youtube') {
         loadYtHistory(true);
+    } else if (tabId === 'settings') {
+        loadSettings();
     }
 }
+
 
 function openMobileDetail(paneId) {
     if (window.innerWidth <= 768) {
@@ -736,3 +739,223 @@ function formatSeconds(sec) {
     }
     return `${min}:${String(s).padStart(2, '0')}`;
 }
+
+// ─── 7. 系统设置与数据迁移模块 ───
+let selectedImportFile = null;
+
+async function loadSettings() {
+    const overviewEl = document.getElementById('settingsSystemOverview');
+    if (overviewEl) overviewEl.textContent = '正在获取最新系统参数...';
+
+    try {
+        const res = await fetch(`${API_BASE}/api/settings`);
+        if (!res.ok) throw new Error('Failed to fetch settings');
+        const data = await res.json();
+
+        // 填充表单
+        const proxyInput = document.getElementById('cfgProxyUrl');
+        if (proxyInput) proxyInput.value = data.proxy_url || '';
+
+        const threadsInput = document.getElementById('cfgWhisperThreads');
+        if (threadsInput) {
+            threadsInput.value = data.whisper_cpu_threads || 2;
+            threadsInput.max = data.cpu_count || 4;
+        }
+
+        const cpuHint = document.getElementById('cfgCpuTotalHint');
+        if (cpuHint) cpuHint.textContent = `核 / 宿主机共 ${data.cpu_count || 4} 核`;
+
+        const modelSelect = document.getElementById('cfgWhisperModel');
+        if (modelSelect) modelSelect.value = data.whisper_model || 'small';
+
+        const cacheInput = document.getElementById('cfgMaxAudioCacheMb');
+        if (cacheInput) cacheInput.value = data.max_audio_cache_mb || 500;
+
+        const curCacheHint = document.getElementById('cfgCurAudioCacheHint');
+        if (curCacheHint) curCacheHint.textContent = `MB (当前缓冲池: ${data.current_audio_cache_mb} MB)`;
+
+        if (overviewEl) {
+            overviewEl.textContent = `数据库: ${data.db_size_mb} MB | 收录: ${data.total_items} 部 | 台词: ${Number(data.total_subtitles).toLocaleString()} 句`;
+        }
+
+        const exportSummary = document.getElementById('exportMetaSummary');
+        if (exportSummary) {
+            exportSummary.innerHTML = `当前主数据库: <strong>${data.db_size_mb} MB</strong> | 包含 <strong>${data.total_items}</strong> 部视频与 <strong>${Number(data.total_subtitles).toLocaleString()}</strong> 句全文索引`;
+        }
+    } catch (e) {
+        console.error('loadSettings error:', e);
+        if (overviewEl) overviewEl.textContent = '加载设置失败，请检查服务连接';
+    }
+}
+
+async function saveSettings() {
+    const btn = document.getElementById('btnSaveConfig');
+    const statusEl = document.getElementById('saveConfigStatus');
+    if (btn) btn.disabled = true;
+    if (statusEl) {
+        statusEl.style.color = '#2563eb';
+        statusEl.textContent = '正在保存并应用配置...';
+    }
+
+    const proxy_url = document.getElementById('cfgProxyUrl')?.value || '';
+    const whisper_cpu_threads = parseInt(document.getElementById('cfgWhisperThreads')?.value || '2', 10);
+    const whisper_model = document.getElementById('cfgWhisperModel')?.value || 'small';
+    const max_audio_cache_mb = parseInt(document.getElementById('cfgMaxAudioCacheMb')?.value || '500', 10);
+
+    try {
+        const res = await fetch(`${API_BASE}/api/settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                proxy_url,
+                whisper_cpu_threads,
+                whisper_model,
+                max_audio_cache_mb
+            })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '保存配置失败');
+
+        if (statusEl) {
+            statusEl.style.color = '#16a34a';
+            statusEl.textContent = '✅ 配置已保存并即时生效！';
+            setTimeout(() => { statusEl.textContent = ''; }, 4000);
+        }
+        loadSettings();
+    } catch (e) {
+        console.error('saveSettings error:', e);
+        if (statusEl) {
+            statusEl.style.color = '#ef4444';
+            statusEl.textContent = `❌ 保存失败: ${e.message}`;
+        }
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+function exportDataTarGz() {
+    // 触发标准浏览器下载
+    window.location.href = `${API_BASE}/api/settings/export`;
+}
+
+function onImportFileSelected(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.name.endsWith('.tar.gz') && !file.name.endsWith('.tgz')) {
+        alert('请选择有效的 .tar.gz 或 .tgz 数据压缩包');
+        return;
+    }
+
+    selectedImportFile = file;
+    const titleEl = document.getElementById('importDropTitle');
+    const subEl = document.getElementById('importDropSub');
+    const btn = document.getElementById('btnExecuteImport');
+
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+    if (titleEl) titleEl.innerHTML = `已选择: <span style="color:#2563eb;">${escapeHtml(file.name)}</span> (${sizeMb} MB)`;
+    if (subEl) subEl.textContent = '点击下方按钮即可开始解压还原';
+    if (btn) btn.disabled = false;
+}
+
+async function executeImportTarGz() {
+    if (!selectedImportFile) return;
+
+    const confirmed = confirm(`确定要导入 [${selectedImportFile.name}] 吗？\n\n系统将自动备份现有数据库为 .bak，然后覆盖还原数据库与 Cookies。`);
+    if (!confirmed) return;
+
+    const btn = document.getElementById('btnExecuteImport');
+    const feedback = document.getElementById('importResultFeedback');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ 正在上传解压并恢复数据库...';
+    }
+    if (feedback) {
+        feedback.style.display = 'block';
+        feedback.style.background = '#eff6ff';
+        feedback.style.color = '#1d4ed8';
+        feedback.style.border = '1px solid #bfdbfe';
+        feedback.textContent = '正在上传数据包并校验文件完整性，请勿刷新页面...';
+    }
+
+    const formData = new FormData();
+    formData.append('file', selectedImportFile);
+
+    try {
+        const res = await fetch(`${API_BASE}/api/settings/import`, {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || '导入恢复失败');
+
+        if (feedback) {
+            feedback.style.background = '#dcfce7';
+            feedback.style.color = '#15803d';
+            feedback.style.border = '1px solid #bbf7d0';
+            feedback.innerHTML = `<strong>🎉 ${escapeHtml(data.message)}</strong><br>已恢复视频记录: <strong>${data.total_items}</strong> 部 (就绪 ${data.ready_items} 部) | 数据库大小: <strong>${data.db_size_mb} MB</strong>`;
+        }
+
+        // 刷新所有 Tab 的数据
+        loadSettings();
+        loadTasks();
+        loadHistorySummary();
+    } catch (e) {
+        console.error('executeImportTarGz error:', e);
+        if (feedback) {
+            feedback.style.background = '#fee2e2';
+            feedback.style.color = '#b91c1c';
+            feedback.style.border = '1px solid #fecaca';
+            feedback.textContent = `❌ 恢复失败: ${e.message}`;
+        }
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🚀 开始解压并恢复数据库';
+        }
+    }
+}
+
+// 绑定拖拽事件到 importTarDropZone
+function initImportDragDrop() {
+    const dropZone = document.getElementById('importTarDropZone');
+    if (!dropZone) return;
+
+    ['dragenter', 'dragover'].forEach(name => {
+        dropZone.addEventListener(name, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.add('dragover');
+        });
+    });
+
+    ['dragleave', 'drop'].forEach(name => {
+        dropZone.addEventListener(name, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('dragover');
+        });
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.classList.remove('dragover');
+        const files = e.dataTransfer?.files;
+        if (files && files.length > 0) {
+            onImportFileSelected({ target: { files: files } });
+        }
+    });
+}
+
+// 页面初始化时挂载拖拽事件
+if (typeof window !== 'undefined') {
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        initImportDragDrop();
+    } else {
+        document.addEventListener('DOMContentLoaded', initImportDragDrop);
+    }
+}
+
